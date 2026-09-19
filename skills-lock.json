@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "secrets-management": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/cicd-automation/skills/secrets-management/SKILL.md",
+      "computedHash": "ca8d6e0507564a438424b9408922f469ceb20827d6f60d845c103df8e5ac11e7"
+    },
     "telegram-bot": {
       "source": "claude-office-skills/skills",
       "sourceType": "github",
