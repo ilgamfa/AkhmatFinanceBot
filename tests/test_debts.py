@@ -1,16 +1,25 @@
-"""Тесты долгов и /stats Фазы 3."""
+"""Тесты долгов, /stats и /refresh Фазы 3 (управление кнопками)."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import date
 
+from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services import debts_repo, users_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
+
+
+def _button_labels(bot: object) -> list[str]:
+    """Тексты кнопок последней клавиатуры бота."""
+    markup = bot.session.last_reply_markup  # type: ignore[attr-defined]
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return []
+    return [button.text for row in markup.inline_keyboard for button in row]
 
 
 async def _onboard(send_message: Send, send_callback: Press) -> None:
@@ -30,7 +39,8 @@ async def _add_debt(
     day: str = "25",
     debt_type: str = "loan",
 ) -> None:
-    await send_message("/debts add")
+    await send_message("/debts")
+    await send_callback("debts:add")
     await send_message(name)
     await send_callback(f"debt_type:{debt_type}")
     await send_message(amount)
@@ -87,17 +97,22 @@ async def test_get_upcoming_payments_short_window(session: AsyncSession) -> None
     assert payments == []
 
 
-# --- 3.2 /debts --------------------------------------------------------------
+# --- 3.2 /debts: список и кнопки ---------------------------------------------
 
 
-async def test_debts_empty(send_message: Send, send_callback: Press) -> None:
+async def test_debts_empty_shows_add_button_only(
+    send_message: Send, send_callback: Press, bot: object
+) -> None:
     await _onboard(send_message, send_callback)
     replies = await send_message("/debts")
     assert "нет долгов" in replies[0]
+    labels = _button_labels(bot)
+    assert "➕ Добавить долг" in labels
+    assert "🗑 Удалить долг" not in labels
 
 
-async def test_debts_shows_list_and_total(
-    send_message: Send, send_callback: Press
+async def test_debts_shows_list_total_and_buttons(
+    send_message: Send, send_callback: Press, bot: object
 ) -> None:
     await _onboard(send_message, send_callback)
     await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
@@ -110,15 +125,21 @@ async def test_debts_shows_list_and_total(
     assert "2. Ипотека — 61 000 ₽, 30 числа" in text
     assert "Итого в месяц: 107 000 ₽" in text
 
+    labels = _button_labels(bot)
+    assert "➕ Добавить долг" in labels
+    assert "🗑 Удалить долг" in labels
 
-# --- 3.3 add / del -----------------------------------------------------------
+
+# --- 3.3 добавление и удаление кнопками --------------------------------------
 
 
 async def test_debts_add_flow(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await send_message("/debts add")
+    await send_message("/debts")
+    replies = await send_callback("debts:add")
+    assert "Название долга?" in replies[0]
     await send_message("Кредитка")
     await send_callback("debt_type:credit_card")
     await send_message("8000")
@@ -131,21 +152,58 @@ async def test_debts_add_flow(
     assert debts[0].payment_day == 5
 
 
-async def test_debts_del(
+async def test_debts_delete_shows_list_with_buttons(
+    send_message: Send, send_callback: Press, session: AsyncSession, bot: object
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    await _add_debt(
+        send_message, send_callback, "Ипотека", "61000", "30", "mortgage"
+    )
+
+    replies = await send_callback("debts:del")
+    assert "Выбери долг для удаления:" in replies[0]
+    labels = _button_labels(bot)
+    assert "1. Кредит — 46 000 ₽, 25 числа" in labels
+    assert "2. Ипотека — 61 000 ₽, 30 числа" in labels
+    assert "❌ Отмена" in labels
+
+    debts = await debts_repo.get_debts(session, 1)
+    assert len(debts) == 2
+
+
+async def test_debts_delete_by_button(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
     debt = (await debts_repo.get_debts(session, 1))[0]
 
-    replies = await send_message(f"/debts del {debt.id}")
-    assert "Долг удалён" in replies[0]
+    replies = await send_callback(f"debt_del:{debt.id}")
+    assert "Долг удалён: Кредит" in replies[0]
     assert await debts_repo.get_debts(session, 1) == []
 
 
-async def test_debts_del_not_found(send_message: Send, send_callback: Press) -> None:
+async def test_debts_delete_cancel(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
     await _onboard(send_message, send_callback)
-    replies = await send_message("/debts del 999")
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+
+    replies = await send_callback("debt_del:cancel")
+    assert "Отменено" in replies[0]
+    assert len(await debts_repo.get_debts(session, 1)) == 1
+
+
+async def test_debts_delete_when_empty(send_message: Send, send_callback: Press) -> None:
+    await _onboard(send_message, send_callback)
+    replies = await send_callback("debts:del")
+    assert "нет долгов" in replies[0]
+
+
+async def test_debts_delete_not_found(send_message: Send, send_callback: Press) -> None:
+    await _onboard(send_message, send_callback)
+    replies = await send_callback("debt_del:999")
     assert "не найден" in replies[0]
 
 
@@ -153,7 +211,8 @@ async def test_debts_add_invalid_day(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await send_message("/debts add")
+    await send_message("/debts")
+    await send_callback("debts:add")
     await send_message("Кредит")
     await send_callback("debt_type:loan")
     await send_message("1000")
