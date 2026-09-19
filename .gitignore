@@ -1,0 +1,19 @@
+# Окружение
+.venv/
+venv/
+
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# База данных
+*.db
+*.sqlite3
+
+# macOS
+.DS_Store
