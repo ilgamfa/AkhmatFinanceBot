@@ -33,17 +33,10 @@ class IncomeType(StrEnum):
     IRREGULAR = "irregular"
 
 
-class DebtKind(StrEnum):
-    """Характер долга: постоянный платёж или разовый (Фаза 3)."""
-
-    CONSTANT = "constant"
-    ONCE = "once"
-
-
 class DebtType(StrEnum):
-    """Тип долга (Фаза 3)."""
+    """Тип обязательного платежа (Фаза 3)."""
 
-    CREDIT = "credit"
+    LOAN = "loan"
     MORTGAGE = "mortgage"
-    CARD = "card"
+    CREDIT_CARD = "credit_card"
     INSTALLMENT = "installment"

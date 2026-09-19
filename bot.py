@@ -8,7 +8,7 @@ import logging
 from aiogram import Bot, Dispatcher
 
 from config import BOT_TOKEN, DB_PATH
-from handlers import onboarding, start, stats, transactions
+from handlers import debts, onboarding, start, stats, transactions
 from handlers.middlewares import DbSessionMiddleware
 from models.database import Database, build_sqlite_url
 
@@ -22,6 +22,7 @@ def create_dispatcher(database: Database) -> Dispatcher:
     dp.include_routers(
         start.build_router(),
         transactions.build_router(),
+        debts.build_router(),
         stats.build_router(),
         onboarding.build_router(),
     )

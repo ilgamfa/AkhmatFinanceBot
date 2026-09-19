@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import User
@@ -51,3 +51,15 @@ async def skip_onboarding(session: AsyncSession, user: User) -> User:
     await session.commit()
     await session.refresh(user)
     return user
+
+
+async def delete_user(session: AsyncSession, telegram_id: int) -> None:
+    """Удаляет пользователя и связанные данные (транзакции, долги)."""
+    from models import Debt, Transaction
+
+    await session.execute(
+        delete(Transaction).where(Transaction.telegram_id == telegram_id)
+    )
+    await session.execute(delete(Debt).where(Debt.telegram_id == telegram_id))
+    await session.execute(delete(User).where(User.telegram_id == telegram_id))
+    await session.commit()

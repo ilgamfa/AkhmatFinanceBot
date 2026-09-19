@@ -195,10 +195,24 @@ async def test_stats_shows_balance_income_and_operations(
     replies = await send_message("/stats")
     text = replies[0]
     assert "Свободно: 107 000 ₽" in text
-    assert "Доход: 50 000 ₽, 10 числа" in text
+    assert "Доход:" in text
+    assert "10 числа — 50 000 ₽" in text
     assert "Последние операции:" in text
     assert "−5 000 ₽ (сегодня)" in text
     assert "+100 000 ₽ (сегодня)" in text
+
+
+async def test_stats_shows_period_balance(
+    send_message: Send, send_callback: Press
+) -> None:
+    await _onboard(send_message, send_callback)
+    await send_message("/minus 5000")
+    await send_message("/plus 30800")
+
+    text = (await send_message("/stats"))[0]
+    assert "За сегодня: +25 800 ₽" in text
+    assert "За неделю: +25 800 ₽" in text
+    assert "За месяц: +25 800 ₽" in text
 
 
 async def test_stats_shows_period_sums(
@@ -234,7 +248,8 @@ async def test_stats_irregular_income_line(
     await send_message("90000")
 
     text = (await send_message("/stats"))[0]
-    assert "Доход: нерегулярный, в среднем 90 000 ₽/мес" in text
+    assert "Доход: нерегулярный" in text
+    assert "Среднее в месяц: 90 000 ₽" in text
 
 
 async def test_stats_fixed_income_sums_dates(
@@ -249,7 +264,9 @@ async def test_stats_fixed_income_sums_dates(
     await send_message("25, 20000")
 
     text = (await send_message("/stats"))[0]
-    assert "Доход: 50 000 ₽ (10 — 30 000 ₽, 25 — 20 000 ₽)" in text
+    assert "Доход:" in text
+    assert "10 числа — 30 000 ₽" in text
+    assert "25 числа — 20 000 ₽" in text
 
 
 async def test_stats_without_onboarding(send_message: Send) -> None:

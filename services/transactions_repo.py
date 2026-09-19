@@ -78,3 +78,32 @@ async def get_sum_by_period(
         )
     )
     return int(result.scalar_one())
+
+
+async def get_balance_by_period(
+    session: AsyncSession, telegram_id: int, period: str
+) -> int:
+    """Сальдо за период: доход + корректировки − траты.
+
+    Суммы correction уже хранятся со знаком влияния на баланс:
+    положительная — баланс вырос, отрицательная — упал.
+    """
+    if period not in VALID_PERIODS:
+        raise ValueError(f"Неизвестный период: {period}")
+
+    start_iso = _period_start(period).isoformat()
+    result = await session.execute(
+        select(Transaction.type, func.coalesce(func.sum(Transaction.amount), 0))
+        .where(
+            Transaction.telegram_id == telegram_id,
+            Transaction.created_at >= start_iso,
+        )
+        .group_by(Transaction.type)
+    )
+    balance = 0
+    for transaction_type, total in result.all():
+        if transaction_type == TransactionType.EXPENSE.value:
+            balance -= int(total)
+        else:
+            balance += int(total)
+    return balance

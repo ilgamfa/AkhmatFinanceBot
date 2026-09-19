@@ -8,7 +8,6 @@ from __future__ import annotations
 from models.base import (
     AdviceStyle,
     Base,
-    DebtKind,
     DebtType,
     IncomeType,
     TransactionType,
@@ -22,7 +21,6 @@ __all__ = [
     "AdviceStyle",
     "Base",
     "Debt",
-    "DebtKind",
     "DebtType",
     "Goal",
     "IncomeType",
