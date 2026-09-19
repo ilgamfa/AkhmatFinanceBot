@@ -8,7 +8,7 @@ from datetime import date
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import debts_repo, users_repo
+from services import debts_repo, goals_repo, users_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -331,3 +331,95 @@ async def test_refresh_yes_resets_and_restarts(
 
     assert await users_repo.get_by_telegram_id(session, 1) is None
     assert await debts_repo.get_debts(session, 1) == []
+
+
+async def test_refresh_yes_deletes_goals(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+
+    await send_message("/refresh")
+    await send_callback("refresh:yes")
+    assert await goals_repo.get_goals(session, 1) == []
+
+
+# --- 4.6 редактирование долгов ------------------------------------------------
+
+
+async def test_debts_edit_shows_list_with_buttons(
+    send_message: Send, send_callback: Press, session: AsyncSession, bot: object
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+
+    replies = await send_callback("debts:edit")
+    assert "Выбери долг для редактирования:" in replies[0]
+    labels = _button_labels(bot)
+    assert "1. Кредит — 46 000 ₽, 25 числа" in labels
+    assert "❌ Отмена" in labels
+
+    debt = (await debts_repo.get_debts(session, 1))[0]
+    replies = await send_callback(f"debt_edit:{debt.id}")
+    assert "Что изменить?" in replies[0]
+    labels = _button_labels(bot)
+    assert "Название" in labels
+    assert "Сумма" in labels
+    assert "Дата" in labels
+
+
+async def test_debts_edit_amount_flow(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    debt = (await debts_repo.get_debts(session, 1))[0]
+
+    await send_callback("debts:edit")
+    await send_callback(f"debt_edit:{debt.id}")
+    replies = await send_callback("debt_field:amount")
+    assert "Новая сумма платежа?" in replies[0]
+    replies = await send_message("50000")
+    assert "Долг обновлён: Кредит — 50 000 ₽, 25 числа" in replies[0]
+
+    session.expire_all()
+    stored = (await debts_repo.get_debts(session, 1))[0]
+    assert stored.amount == 50000
+
+
+async def test_debts_edit_name_and_day(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    debt = (await debts_repo.get_debts(session, 1))[0]
+
+    await send_callback("debts:edit")
+    await send_callback(f"debt_edit:{debt.id}")
+    await send_callback("debt_field:name")
+    await send_message("Автокредит")
+    session.expire_all()
+    stored = (await debts_repo.get_debts(session, 1))[0]
+    assert stored.name == "Автокредит"
+
+    await send_callback("debts:edit")
+    await send_callback(f"debt_edit:{debt.id}")
+    await send_callback("debt_field:payment_day")
+    replies = await send_message("5")
+    assert "Долг обновлён: Автокредит — 46 000 ₽, 5 числа" in replies[0]
+
+    session.expire_all()
+    stored = (await debts_repo.get_debts(session, 1))[0]
+    assert stored.payment_day == 5
+
+
+async def test_debts_edit_cancel(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+
+    replies = await send_callback("debt_edit:cancel")
+    assert "Отменено" in replies[0]
+    stored = (await debts_repo.get_debts(session, 1))[0]
+    assert stored.amount == 46000

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import calendar
 import json
+import math
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from utils.money import format_amount
@@ -66,6 +67,105 @@ def days_until_next_income(
     """Минимальное число дней до ближайшего поступления или None."""
     days = [days_until_day_of_month(today, day) for day, _ in entries]
     return min(days) if days else None
+
+
+def end_of_month(today: date) -> date:
+    """Последний день текущего календарного месяца."""
+    last_day = calendar.monthrange(today.year, today.month)[1]
+    return date(today.year, today.month, last_day)
+
+
+# --- Цели (Фаза 4) -----------------------------------------------------------
+
+
+GOAL_EMOJI: dict[str, str] = {
+    "машина": "🚗",
+    "авто": "🚗",
+    "подушка": "🛟",
+    "квартира": "🏠",
+    "отпуск": "✈️",
+    "путешествие": "✈️",
+    "телефон": "📱",
+    "ремонт": "🔧",
+}
+DEFAULT_GOAL_EMOJI = "🎯"
+
+
+def goal_emoji(name: str) -> str:
+    """Эмодзи цели по названию (fallback — 🎯)."""
+    return GOAL_EMOJI.get(name.strip().lower(), DEFAULT_GOAL_EMOJI)
+
+
+def goal_progress_percent(saved: int, target: int) -> int:
+    """Процент накопления цели (целое число)."""
+    if target <= 0:
+        return 0
+    return round(saved * 100 / target)
+
+
+def months_until_deadline(deadline_iso: str | None, today: date) -> int | None:
+    """Календарные месяцы до срока (минимум 1) или None, если срока нет.
+
+    Если срок прошёл — возвращается 1 (цель нужно закрыть как можно скорее).
+    """
+    if not deadline_iso:
+        return None
+    try:
+        deadline_date = date.fromisoformat(deadline_iso)
+    except ValueError:
+        return None
+    months = (
+        (deadline_date.year - today.year) * 12 + (deadline_date.month - today.month)
+    )
+    # Если в текущем месяце срок уже прошёл по числу — месяц ещё не наступил.
+    if deadline_date.day < today.day:
+        months -= 1
+    return max(1, months)
+
+
+def monthly_goal_amount(
+    saved: int,
+    target: int,
+    deadline_iso: str | None,
+    today: date,
+) -> int | None:
+    """Сколько откладывать в месяц: ceil((target − saved) / месяцев). None без срока."""
+    months = months_until_deadline(deadline_iso, today)
+    if months is None:
+        return None
+    remaining = target - saved
+    if remaining <= 0:
+        return 0
+    return math.ceil(remaining / months)
+
+
+def parse_goal_deadline(text: str | None) -> str | None:
+    """Разбирает ввод срока: «01.12.2027» → «2027-12-01», «skip»/«нет» → None.
+
+    Raises:
+        ValueError: если формат не распознан.
+    """
+    cleaned = (text or "").strip().lower()
+    if cleaned in ("skip", "нет", "-"):
+        return None
+    try:
+        parsed = datetime.strptime(cleaned, "%d.%m.%Y").date()
+    except ValueError as exc:
+        raise ValueError(
+            "Не понял срок. Напиши дату в формате 01.12.2027 или skip."
+        ) from exc
+    return parsed.isoformat()
+
+
+def format_goal_deadline(deadline_iso: str | None) -> str | None:
+    """«2027-12-01» → «01.12.2027», пустой срок → None."""
+    if not deadline_iso:
+        return None
+    try:
+        parsed = date.fromisoformat(deadline_iso)
+    except ValueError:
+        return None
+    return parsed.strftime("%d.%m.%Y")
 
 
 def build_advice(

@@ -28,16 +28,26 @@ CANCEL_TEXT = "Отменено"
 
 ADD_BUTTON_TEXT = "➕ Добавить долг"
 DELETE_BUTTON_TEXT = "🗑 Удалить долг"
+EDIT_BUTTON_TEXT = "✏️ Редактировать"
 CANCEL_BUTTON_TEXT = "❌ Отмена"
 
 CALLBACK_ADD = "debts:add"
 CALLBACK_DELETE_LIST = "debts:del"
 CALLBACK_DELETE_CANCEL = "debt_del:cancel"
+CALLBACK_EDIT_LIST = "debts:edit"
+CALLBACK_EDIT_CANCEL = "debt_edit:cancel"
+
+EDIT_LIST_TITLE = "Выбери долг для редактирования:"
+FIELDS_TITLE = "Что изменить?"
 
 NAME_PROMPT = "Название долга? Например: Кредит"
 TYPE_PROMPT = "Тип долга?"
 AMOUNT_PROMPT = "Сумма платежа? Например: 46000"
 DAY_PROMPT = "День месяца? Например: 25"
+
+EDIT_NAME_PROMPT = "Новое название долга? Например: Кредит"
+EDIT_AMOUNT_PROMPT = "Новая сумма платежа? Например: 50000"
+EDIT_DAY_PROMPT = "Новый день месяца? Например: 25"
 
 TYPE_LABELS = {
     DebtType.LOAN.value: "Кредит",
@@ -56,6 +66,12 @@ class DebtFlow(StatesGroup):
     payment_day = State()
 
 
+class DebtEditFlow(StatesGroup):
+    """Шаги редактирования долга."""
+
+    field_value = State()
+
+
 def _force_reply(prompt: str) -> ForceReply:
     return ForceReply(input_field_placeholder=prompt, selective=True)
 
@@ -71,16 +87,25 @@ def _type_keyboard() -> InlineKeyboardMarkup:
 
 def _manage_keyboard(has_debts: bool) -> InlineKeyboardMarkup:
     """Кнопки управления списком долгов."""
-    buttons = [
-        InlineKeyboardButton(text=ADD_BUTTON_TEXT, callback_data=CALLBACK_ADD)
-    ]
-    if has_debts:
-        buttons.append(
-            InlineKeyboardButton(
-                text=DELETE_BUTTON_TEXT, callback_data=CALLBACK_DELETE_LIST
-            )
+    if not has_debts:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=ADD_BUTTON_TEXT, callback_data=CALLBACK_ADD)]
+            ]
         )
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=ADD_BUTTON_TEXT, callback_data=CALLBACK_ADD)],
+            [
+                InlineKeyboardButton(
+                    text=EDIT_BUTTON_TEXT, callback_data=CALLBACK_EDIT_LIST
+                ),
+                InlineKeyboardButton(
+                    text=DELETE_BUTTON_TEXT, callback_data=CALLBACK_DELETE_LIST
+                ),
+            ],
+        ]
+    )
 
 
 def _delete_button_label(index: int, debt: Debt) -> str:
@@ -110,6 +135,38 @@ def _delete_list_keyboard(debts: list[Debt]) -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _edit_list_keyboard(debts: list[Debt]) -> InlineKeyboardMarkup:
+    """Кнопки долгов для выбора в списке редактирования."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=_delete_button_label(index, debt),
+                callback_data=f"debt_edit:{debt.id}",
+            )
+        ]
+        for index, debt in enumerate(debts, start=1)
+    ]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=CANCEL_BUTTON_TEXT, callback_data=CALLBACK_EDIT_CANCEL
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _edit_fields_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки выбора поля долга для редактирования."""
+    buttons = [
+        InlineKeyboardButton(text="Название", callback_data="debt_field:name"),
+        InlineKeyboardButton(text="Сумма", callback_data="debt_field:amount"),
+        InlineKeyboardButton(text="Дата", callback_data="debt_field:payment_day"),
+        InlineKeyboardButton(text=CANCEL_BUTTON_TEXT, callback_data=CALLBACK_EDIT_CANCEL),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
 def format_debts_list(debts: list[Debt]) -> str:
@@ -194,6 +251,120 @@ async def on_delete_debt_pressed(
 async def on_delete_cancel_pressed(callback: CallbackQuery) -> None:
     """[❌ Отмена]: отменяет удаление."""
     await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(CANCEL_TEXT)
+
+
+async def on_edit_list_pressed(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """[✏️ Редактировать]: показывает список долгов с кнопками."""
+    await callback.answer()
+    if callback.from_user is None or not isinstance(callback.message, Message):
+        return
+    debts = await debts_repo.get_debts(session, callback.from_user.id)
+    if not debts:
+        await callback.message.answer(NO_DEBTS_TEXT)
+        return
+    await callback.message.answer(
+        EDIT_LIST_TITLE, reply_markup=_edit_list_keyboard(debts)
+    )
+
+
+async def on_edit_debt_picked(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    """[N. Название]: показывает поля долга для редактирования."""
+    await callback.answer()
+    if callback.data is None or not isinstance(callback.message, Message):
+        return
+    debt_id = int(callback.data.split(":", 1)[1])
+    await state.set_state(DebtEditFlow.field_value)
+    await state.update_data(debt_id=debt_id)
+    await callback.message.answer(FIELDS_TITLE, reply_markup=_edit_fields_keyboard())
+
+
+async def on_edit_field_pressed(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    """[Название/Сумма/Дата]: запрашивает новое значение."""
+    await callback.answer()
+    if callback.data is None or not isinstance(callback.message, Message):
+        return
+    data = await state.get_data()
+    if "debt_id" not in data:
+        await state.clear()
+        await callback.message.answer(CANCEL_TEXT)
+        return
+
+    field = callback.data.split(":", 1)[1]
+    prompts = {
+        "name": EDIT_NAME_PROMPT,
+        "amount": EDIT_AMOUNT_PROMPT,
+        "payment_day": EDIT_DAY_PROMPT,
+    }
+    await state.update_data(field=field)
+    await callback.message.answer(
+        prompts[field], reply_markup=_force_reply(prompts[field])
+    )
+
+
+async def process_edit_message(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Новое значение поля долга."""
+    if message.from_user is None:
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    debt_id = data.get("debt_id")
+    field = data.get("field")
+    if debt_id is None or field is None:
+        await state.clear()
+        await message.answer(CANCEL_TEXT)
+        return
+
+    if field == "name":
+        value = (message.text or "").strip()
+        if not value:
+            await message.answer("Напиши название. Например: Кредит")
+            return
+    elif field == "amount":
+        try:
+            value = parse_amount(message.text)
+        except ValueError:
+            await message.answer("Не понял сумму. Напиши число, например: 50000")
+            return
+        if value <= 0:
+            await message.answer("Сумма должна быть больше нуля. Попробуй ещё раз.")
+            return
+    else:
+        cleaned = (message.text or "").strip()
+        if not cleaned.isdigit() or not 1 <= int(cleaned) <= 31:
+            await message.answer("Нужно число от 1 до 31. Попробуй ещё раз.")
+            return
+        value = int(cleaned)
+
+    await state.clear()
+    updated = await debts_repo.update_debt(
+        session, message.from_user.id, debt_id, **{field: value}
+    )
+    if updated is None:
+        await message.answer(DELETE_NOT_FOUND_TEXT)
+        return
+    await message.answer(
+        f"Долг обновлён: {updated.name} — {format_amount(updated.amount)}, "
+        f"{updated.payment_day} числа"
+    )
+
+
+async def on_edit_cancel_pressed(
+    callback: CallbackQuery, state: FSMContext
+) -> None:
+    """[❌ Отмена]: отменяет редактирование."""
+    await callback.answer()
+    await state.clear()
     if isinstance(callback.message, Message):
         await callback.message.answer(CANCEL_TEXT)
 
@@ -290,5 +461,20 @@ def build_router() -> Router:
     )
     router.callback_query.register(
         on_delete_cancel_pressed, F.data == CALLBACK_DELETE_CANCEL
+    )
+    router.callback_query.register(
+        on_edit_list_pressed, F.data == CALLBACK_EDIT_LIST
+    )
+    router.callback_query.register(
+        on_edit_debt_picked, F.data.regexp(r"^debt_edit:\d+$")
+    )
+    router.callback_query.register(
+        on_edit_field_pressed, F.data.regexp(r"^debt_field:(name|amount|payment_day)$")
+    )
+    router.message.register(
+        process_edit_message, DebtEditFlow.field_value, ~F.text.startswith("/")
+    )
+    router.callback_query.register(
+        on_edit_cancel_pressed, F.data == CALLBACK_EDIT_CANCEL
     )
     return router

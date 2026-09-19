@@ -73,6 +73,11 @@ def format_amount(rubles: int) -> str:
     return f"{rubles:,}".replace(",", " ") + " ₽"
 
 
+def format_rubles(rubles: int) -> str:
+    """Форматирует сумму в вид «12 000» без обозначения валюты."""
+    return f"{rubles:,}".replace(",", " ")
+
+
 def parse_day_and_amount(text: str | None) -> tuple[int, int]:
     """Разбирает строку вида «10, 50000» в пару (день месяца, сумма).
 

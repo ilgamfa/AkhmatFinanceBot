@@ -1,8 +1,7 @@
-"""Команда /stats — сводка Фаз 2–3."""
+"""Команда /stats — сводка Фаз 2–4."""
 
 from __future__ import annotations
 
-import calendar
 from datetime import UTC, date, datetime, timedelta
 
 from aiogram import Router
@@ -12,9 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Transaction, User
 from models.base import IncomeType, TransactionType
-from services import debts_repo, transactions_repo, users_repo
-from services.calculations import parse_income_dates
-from utils.money import format_amount
+from services import debts_repo, goals_repo, transactions_repo, users_repo
+from services.calculations import (
+    end_of_month,
+    goal_emoji,
+    goal_progress_percent,
+    parse_income_dates,
+)
+from utils.money import format_amount, format_rubles
 
 router = Router(name="stats")
 
@@ -97,12 +101,6 @@ def next_salary_date(user: User, today: date) -> date | None:
     return debts_repo.next_payment_date(salary_day, today)
 
 
-def end_of_month(today: date) -> date:
-    """Последний день текущего календарного месяца."""
-    last_day = calendar.monthrange(today.year, today.month)[1]
-    return date(today.year, today.month, last_day)
-
-
 async def build_stats_text(
     session: AsyncSession, user: User, today: date | None = None
 ) -> str:
@@ -156,6 +154,18 @@ async def build_stats_text(
             f"Свободно до конца месяца: "
             f"{format_amount(free_money - until_month_end)}"
         )
+
+    goals = await goals_repo.get_goals(session, user.telegram_id)
+    if goals:
+        lines.append("")
+        lines.append("Цели:")
+        for goal in goals:
+            percent = goal_progress_percent(goal.saved, goal.target)
+            lines.append(
+                f"{goal_emoji(goal.name)} {goal.name}: "
+                f"{format_rubles(goal.saved)} / {format_rubles(goal.target)} ₽ "
+                f"({percent}%)"
+            )
 
     last = await transactions_repo.get_last_transactions(
         session, user.telegram_id, LAST_LIMIT

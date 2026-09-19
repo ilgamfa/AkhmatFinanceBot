@@ -1,28 +1,27 @@
-"""Модель цели. Логика — Фаза 4, таблица создаётся заранее."""
+"""Модель финансовой цели (Фаза 4)."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
-
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, String, func
+from sqlalchemy import BigInteger, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base
 
 
 class Goal(Base):
-    """Финансовая цель пользователя."""
+    """Цель пользователя: название, сумма, накоплено, срок, приоритет."""
 
     __tablename__ = "goals"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     name: Mapped[str] = mapped_column(String(64))
-    target_amount: Mapped[int] = mapped_column(BigInteger)
-    saved_amount: Mapped[int] = mapped_column(BigInteger, default=0)
-    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    # Целевая сумма, целые рубли.
+    target: Mapped[int] = mapped_column(Integer)
+    # Отложено, целые рубли.
+    saved: Mapped[int] = mapped_column(Integer, default=0)
+    # ISO-дата (например 2027-12-01) или NULL.
+    deadline: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Приоритет: 1 — высокий, 2 — средний, 3 — низкий.
+    priority: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String(40))

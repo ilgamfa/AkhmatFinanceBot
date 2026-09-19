@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 from datetime import UTC, date, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Debt
@@ -94,6 +94,30 @@ async def delete_debt(session: AsyncSession, telegram_id: int, debt_id: int) -> 
     )
     await session.commit()
     return result.rowcount > 0
+
+
+DEBT_ALLOWED_FIELDS = ("name", "type", "amount", "payment_day")
+
+
+async def update_debt(
+    session: AsyncSession,
+    telegram_id: int,
+    debt_id: int,
+    **fields: object,
+) -> Debt | None:
+    """Обновляет разрешённые поля долга. Возвращает долг или None."""
+    payload = {key: value for key, value in fields.items() if key in DEBT_ALLOWED_FIELDS}
+    if not payload:
+        return await get_debt(session, telegram_id, debt_id)
+    result = await session.execute(
+        update(Debt)
+        .where(Debt.telegram_id == telegram_id, Debt.id == debt_id)
+        .values(**payload)
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        return None
+    return await get_debt(session, telegram_id, debt_id)
 
 
 async def delete_all_debts(session: AsyncSession, telegram_id: int) -> None:
