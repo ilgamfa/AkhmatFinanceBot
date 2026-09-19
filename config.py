@@ -23,3 +23,6 @@ def _require_env(name: str) -> str:
 
 
 BOT_TOKEN: str = _require_env("BOT_TOKEN")
+
+# Путь к файлу базы данных SQLite. Можно переопределить через .env.
+DB_PATH: str = os.getenv("DB_PATH", "finance.db").strip() or "finance.db"
