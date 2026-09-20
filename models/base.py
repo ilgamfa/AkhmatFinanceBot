@@ -24,6 +24,7 @@ class TransactionType(StrEnum):
     INCOME = "income"
     EXPENSE = "expense"
     CORRECTION = "correction"
+    SAVINGS_ADD = "savings_add"
 
 
 class IncomeType(StrEnum):

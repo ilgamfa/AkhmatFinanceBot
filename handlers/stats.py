@@ -11,7 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Transaction, User
 from models.base import IncomeType, TransactionType
-from services import debts_repo, goals_repo, transactions_repo, users_repo
+from services import (
+    allocations_repo,
+    debts_repo,
+    goals_repo,
+    savings_repo,
+    transactions_repo,
+    users_repo,
+)
 from services.calculations import (
     end_of_month,
     goal_emoji,
@@ -67,6 +74,8 @@ def format_transaction_line(transaction: Transaction, today: date) -> str:
         signed = f"−{format_amount(transaction.amount)}"
     elif transaction.type == TransactionType.INCOME.value:
         signed = f"+{format_amount(transaction.amount)}"
+    elif transaction.type == TransactionType.SAVINGS_ADD.value:
+        signed = f"→ Копилка: {format_amount(transaction.amount)}"
     else:
         sign = "+" if transaction.amount >= 0 else "−"
         signed = f"{sign}{format_amount(abs(transaction.amount))}"
@@ -155,15 +164,25 @@ async def build_stats_text(
             f"{format_amount(free_money - until_month_end)}"
         )
 
+    savings_balance = await savings_repo.get_savings(session, user.telegram_id)
     goals = await goals_repo.get_goals(session, user.telegram_id)
+    allocated = (
+        await allocations_repo.get_allocations_by_user(session, user.telegram_id)
+        if goals
+        else {}
+    )
+    if savings_balance > 0:
+        lines.append("")
+        lines.append(f"Копилка: {format_amount(savings_balance)}")
     if goals:
         lines.append("")
         lines.append("Цели:")
         for goal in goals:
-            percent = goal_progress_percent(goal.saved, goal.target)
+            progress = allocated.get(goal.id, 0)
+            percent = goal_progress_percent(progress, goal.target)
             lines.append(
                 f"{goal_emoji(goal.name)} {goal.name}: "
-                f"{format_rubles(goal.saved)} / {format_rubles(goal.target)} ₽ "
+                f"{format_rubles(progress)} / {format_rubles(goal.target)} ₽ "
                 f"({percent}%)"
             )
 

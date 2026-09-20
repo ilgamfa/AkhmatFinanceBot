@@ -102,7 +102,10 @@ async def get_balance_by_period(
     )
     balance = 0
     for transaction_type, total in result.all():
-        if transaction_type == TransactionType.EXPENSE.value:
+        if transaction_type in (
+            TransactionType.EXPENSE.value,
+            TransactionType.SAVINGS_ADD.value,
+        ):
             balance -= int(total)
         else:
             balance += int(total)

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Goal
+from models import Allocation, Goal
 
-ALLOWED_FIELDS = ("name", "target", "saved", "deadline", "priority")
+ALLOWED_FIELDS = ("name", "target", "deadline", "priority")
 
 
 def _now_iso() -> str:
@@ -77,23 +77,25 @@ async def update_goal(
     return await get_goal(session, telegram_id, goal_id)
 
 
-async def update_goal_saved(
-    session: AsyncSession, telegram_id: int, goal_id: int, amount: int
-) -> Goal | None:
-    """Обновляет накопленную сумму цели."""
-    return await update_goal(session, telegram_id, goal_id, saved=amount)
-
-
 async def delete_goal(session: AsyncSession, telegram_id: int, goal_id: int) -> bool:
-    """Удаляет цель. Возвращает True, если цель была найдена."""
+    """Удаляет цель и её связи. Деньги из связей снова становятся свободными.
+
+    Возвращает True, если цель была найдена.
+    """
+    goal = await get_goal(session, telegram_id, goal_id)
+    if goal is None:
+        return False
+    await session.execute(delete(Allocation).where(Allocation.goal_id == goal_id))
+    await session.execute(delete(Goal).where(Goal.id == goal_id))
+    await session.commit()
+    return True
+
+
+async def get_goal_progress(session: AsyncSession, goal_id: int) -> int:
+    """Прогресс цели: сумма связей, закреплённых из копилки."""
     result = await session.execute(
-        delete(Goal).where(Goal.telegram_id == telegram_id, Goal.id == goal_id)
+        select(func.coalesce(func.sum(Allocation.amount), 0)).where(
+            Allocation.goal_id == goal_id
+        )
     )
-    await session.commit()
-    return result.rowcount > 0
-
-
-async def delete_all_goals(session: AsyncSession, telegram_id: int) -> None:
-    """Удаляет все цели пользователя (для /refresh)."""
-    await session.execute(delete(Goal).where(Goal.telegram_id == telegram_id))
-    await session.commit()
+    return int(result.scalar_one())

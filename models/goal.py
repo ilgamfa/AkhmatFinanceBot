@@ -9,7 +9,11 @@ from models.base import Base
 
 
 class Goal(Base):
-    """Цель пользователя: название, сумма, накоплено, срок, приоритет."""
+    """Цель пользователя: название, сумма, срок, приоритет.
+
+    «Накоплено» не хранится — прогресс считается по суммам связей
+    (Allocation), закреплённым за целью из копилки.
+    """
 
     __tablename__ = "goals"
 
@@ -18,8 +22,6 @@ class Goal(Base):
     name: Mapped[str] = mapped_column(String(64))
     # Целевая сумма, целые рубли.
     target: Mapped[int] = mapped_column(Integer)
-    # Отложено, целые рубли.
-    saved: Mapped[int] = mapped_column(Integer, default=0)
     # ISO-дата (например 2027-12-01) или NULL.
     deadline: Mapped[str | None] = mapped_column(String(10), nullable=True)
     # Приоритет: 1 — высокий, 2 — средний, 3 — низкий.

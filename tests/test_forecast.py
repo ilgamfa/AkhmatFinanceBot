@@ -9,7 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from handlers.forecast import build_forecast_text
 from models import User
-from services import debts_repo, goals_repo, users_repo
+from services import (
+    allocations_repo,
+    debts_repo,
+    goals_repo,
+    savings_repo,
+    users_repo,
+)
 from services.calculations import dump_income_dates
 
 Send = Callable[..., Awaitable[list[str]]]
@@ -31,11 +37,15 @@ async def _profile_user(session: AsyncSession, user_id: int = 1) -> User:
 
 
 async def test_forecast_calculates_exact(session: AsyncSession) -> None:
-    """Прогноз: свободно + доход − долги − цели, при минусе — предупреждение."""
+    """Прогноз: свободно + доход − долги − цели, при минусе — предупреждение.
+
+    Прогресс цели берётся из связей копилки.
+    """
     user = await _profile_user(session)
     await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+    await savings_repo.add_to_savings(session, 1, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, "2027-12-25", 1)
-    await goals_repo.update_goal_saved(session, 1, goal.id, 50000)
+    await allocations_repo.allocate(session, goal.id, 50000)
 
     text = await build_forecast_text(session, user, today=FIXED_TODAY)
     assert "Прогноз на ближайший месяц:" in text
@@ -45,6 +55,19 @@ async def test_forecast_calculates_exact(session: AsyncSession) -> None:
     assert "Отложить на цели: 96 667 ₽" in text
     assert "Свободно после всего: −80 667 ₽" in text
     assert "⚠️ Ты в минусе. Цели под угрозой." in text
+
+
+async def test_forecast_goal_without_deadline_excluded(session: AsyncSession) -> None:
+    """Цели без срока не добавляют «нужно в месяц» в прогноз."""
+    user = await _profile_user(session)
+    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+    await savings_repo.add_to_savings(session, 1, 50000)
+    goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+    await allocations_repo.allocate(session, goal.id, 50000)
+
+    text = await build_forecast_text(session, user, today=FIXED_TODAY)
+    assert "Отложить на цели: 0 ₽" in text
+    assert "Свободно после всего: 16 000 ₽" in text
 
 
 async def test_forecast_positive_no_warning(session: AsyncSession) -> None:

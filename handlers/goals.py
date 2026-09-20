@@ -18,7 +18,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Goal
-from services import goals_repo
+from services import allocations_repo, goals_repo
 from services.calculations import (
     format_goal_deadline,
     goal_emoji,
@@ -39,11 +39,13 @@ FIELDS_TITLE = "Что изменить?"
 CANCEL_TEXT = "Отменено"
 
 ADD_BUTTON_TEXT = "➕ Добавить цель"
+ALLOCATE_BUTTON_TEXT = "💰 Распределить"
 EDIT_BUTTON_TEXT = "✏️ Редактировать"
 DELETE_BUTTON_TEXT = "🗑 Удалить"
 CANCEL_BUTTON_TEXT = "❌ Отмена"
 
 CALLBACK_ADD = "goals:add"
+CALLBACK_ALLOCATE = "alloc:start"
 CALLBACK_EDIT_LIST = "goals:edit"
 CALLBACK_DELETE_LIST = "goals:del"
 CALLBACK_EDIT_CANCEL = "goals_edit:cancel"
@@ -95,7 +97,14 @@ def _manage_keyboard() -> InlineKeyboardMarkup:
     """Кнопки управления списком целей."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=ADD_BUTTON_TEXT, callback_data=CALLBACK_ADD)],
+            [
+                InlineKeyboardButton(
+                    text=ADD_BUTTON_TEXT, callback_data=CALLBACK_ADD
+                ),
+                InlineKeyboardButton(
+                    text=ALLOCATE_BUTTON_TEXT, callback_data=CALLBACK_ALLOCATE
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text=EDIT_BUTTON_TEXT, callback_data=CALLBACK_EDIT_LIST
@@ -164,27 +173,33 @@ def format_goal_summary(goal: Goal) -> str:
     return body
 
 
-def format_goals_list(goals: list[Goal], today: date | None = None) -> str:
-    """Собирает текст списка целей с «нужно в месяц» и итогом."""
+def format_goals_list(
+    goals: list[Goal],
+    allocated_by_goal: dict[int, int] | None = None,
+    today: date | None = None,
+) -> str:
+    """Собирает текст списка целей: прогресс из связей копилки и итог."""
     today = today or datetime.now(UTC).date()
+    allocated_by_goal = allocated_by_goal or {}
     lines = ["Твои цели:", ""]
-    total_monthly = 0
     for index, goal in enumerate(goals, start=1):
-        percent = goal_progress_percent(goal.saved, goal.target)
+        progress = allocated_by_goal.get(goal.id, 0)
+        percent = goal_progress_percent(progress, goal.target)
         lines.append(
             f"{index}. {goal_emoji(goal.name)} {goal.name}: "
-            f"{format_rubles(goal.saved)} / {format_rubles(goal.target)} ₽ "
+            f"{format_rubles(progress)} / {format_rubles(goal.target)} ₽ "
             f"({percent}%)"
         )
         deadline = format_goal_deadline(goal.deadline)
         if deadline:
             lines.append(f"   Срок: {deadline}")
-        monthly = monthly_goal_amount(goal.saved, goal.target, goal.deadline, today)
+        monthly = monthly_goal_amount(progress, goal.target, goal.deadline, today)
         if monthly is not None:
             lines.append(f"   Нужно в месяц: {format_amount(monthly)}")
-            total_monthly += monthly
     lines.append("")
-    lines.append(f"Итого откладывать: {format_amount(total_monthly)}/мес")
+    lines.append(
+        f"Итого закреплено: {format_amount(sum(allocated_by_goal.values()))} ₽"
+    )
     return "\n".join(lines)
 
 
@@ -197,8 +212,11 @@ async def cmd_goals(message: Message, session: AsyncSession) -> None:
     if not goals:
         await message.answer(NO_GOALS_TEXT, reply_markup=_empty_keyboard())
         return
+    allocated = await allocations_repo.get_allocations_by_user(
+        session, message.from_user.id
+    )
     await message.answer(
-        format_goals_list(goals), reply_markup=_manage_keyboard()
+        format_goals_list(goals, allocated), reply_markup=_manage_keyboard()
     )
 
 
@@ -461,7 +479,10 @@ async def on_delete_goal_pressed(
         await callback.message.answer(GOAL_NOT_FOUND_TEXT)
         return
     await goals_repo.delete_goal(session, callback.from_user.id, goal_id)
-    await callback.message.answer(f"{GOAL_DELETED_PREFIX}{goal.name}")
+    await callback.message.answer(
+        f"{GOAL_DELETED_PREFIX}{goal.name}. "
+        "Связи сняты, деньги вернулись в свободные копилки."
+    )
 
 
 async def on_delete_cancel_pressed(callback: CallbackQuery) -> None:

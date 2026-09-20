@@ -8,7 +8,13 @@ from datetime import date
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import debts_repo, goals_repo, users_repo
+from services import (
+    allocations_repo,
+    debts_repo,
+    goals_repo,
+    savings_repo,
+    users_repo,
+)
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -333,15 +339,22 @@ async def test_refresh_yes_resets_and_restarts(
     assert await debts_repo.get_debts(session, 1) == []
 
 
-async def test_refresh_yes_deletes_goals(
+async def test_refresh_yes_deletes_goals_savings_and_allocations(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+    await savings_repo.add_to_savings(session, 1, 50000)
+    goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+    await allocations_repo.allocate(session, goal.id, 40000)
+    goal_id = goal.id
 
     await send_message("/refresh")
     await send_callback("refresh:yes")
+
+    session.expire_all()
     assert await goals_repo.get_goals(session, 1) == []
+    assert await allocations_repo.get_allocations_by_goal(session, goal_id) == []
+    assert await savings_repo.get_savings(session, 1) == 0
 
 
 # --- 4.6 редактирование долгов ------------------------------------------------

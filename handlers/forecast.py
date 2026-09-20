@@ -11,7 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import User
 from models.base import IncomeType
-from services import debts_repo, goals_repo, users_repo
+from services import (
+    allocations_repo,
+    debts_repo,
+    goals_repo,
+    users_repo,
+)
 from services.calculations import end_of_month, monthly_goal_amount, parse_income_dates
 from utils.money import format_amount
 
@@ -58,10 +63,14 @@ async def build_forecast_text(
             debts_repo.payments_within(debt.payment_day, today, days_to_month_end)
         )
 
+    goals = await goals_repo.get_goals(session, user.telegram_id)
+    allocated = await allocations_repo.get_allocations_by_user(
+        session, user.telegram_id
+    )
     goals_monthly = 0
-    for goal in await goals_repo.get_goals(session, user.telegram_id):
+    for goal in goals:
         monthly = monthly_goal_amount(
-            goal.saved, goal.target, goal.deadline, today
+            allocated.get(goal.id, 0), goal.target, goal.deadline, today
         )
         if monthly is not None:
             goals_monthly += monthly
