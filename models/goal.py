@@ -19,6 +19,8 @@ class Goal(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # family_id заполняется, если цель общая для семьи (иначе NULL).
+    family_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(64))
     # Целевая сумма, целые рубли.
     target: Mapped[int] = mapped_column(Integer)

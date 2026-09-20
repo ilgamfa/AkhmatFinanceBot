@@ -15,7 +15,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Goal
-from services import allocations_repo, goals_repo, savings_repo
+from services import allocations_repo, goals_repo
 from services.calculations import goal_progress_percent
 from utils.money import format_amount, format_rubles, parse_amount
 
@@ -108,7 +108,9 @@ async def on_goal_picked(
     if goal is None:
         await callback.message.answer(GOAL_NOT_FOUND_TEXT)
         return
-    free = await savings_repo.get_free_in_savings(session, callback.from_user.id)
+    free = await allocations_repo.get_free_in_savings(
+        session, callback.from_user.id
+    )
     prompt = (
         f"Сколько закрепить за целью «{goal.name}»? "
         f"Свободно в копилке: {format_amount(free)}"
@@ -148,13 +150,15 @@ async def process_amount(
         return
 
     try:
-        progress = await allocations_repo.allocate(session, goal_id, amount)
+        progress = await allocations_repo.allocate(
+            session, goal_id, amount, telegram_id
+        )
     except ValueError:
-        free_now = await savings_repo.get_free_in_savings(session, telegram_id)
+        free_now = await allocations_repo.get_free_in_savings(session, telegram_id)
         await message.answer(INSUFFICIENT_TEXT.format(amount=format_amount(free_now)))
         return
 
-    free_after = await savings_repo.get_free_in_savings(session, telegram_id)
+    free_after = await allocations_repo.get_free_in_savings(session, telegram_id)
     percent = goal_progress_percent(progress, goal.target)
     await message.answer(
         f"Закреплено за целью «{goal.name}»: {format_amount(amount)}\n"

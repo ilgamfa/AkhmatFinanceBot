@@ -98,7 +98,9 @@ async def send_message(
     """Возвращает функцию отправки сообщения боту и сбора ответов."""
     counter = itertools.count(1)
 
-    async def _send(text: str, *, user_id: int = 1) -> list[str]:
+    async def _send(
+        text: str, *, user_id: int = 1, first_name: str = "Test"
+    ) -> list[str]:
         update_id = next(counter)
         update = Update(
             update_id=update_id,
@@ -106,7 +108,7 @@ async def send_message(
                 message_id=update_id,
                 date=datetime.now(UTC),
                 chat=Chat(id=user_id, type="private"),
-                from_user=TgUser(id=user_id, is_bot=False, first_name="Test"),
+                from_user=TgUser(id=user_id, is_bot=False, first_name=first_name),
                 text=text,
             ),
         )
@@ -124,13 +126,15 @@ async def send_callback(
     """Возвращает функцию нажатия inline-кнопки и сбора ответов бота."""
     counter = itertools.count(1000)
 
-    async def _press(data: str, *, user_id: int = 1) -> list[str]:
+    async def _press(
+        data: str, *, user_id: int = 1, first_name: str = "Test"
+    ) -> list[str]:
         update_id = next(counter)
         update = Update(
             update_id=update_id,
             callback_query=CallbackQuery(
                 id=f"cb{update_id}",
-                from_user=TgUser(id=user_id, is_bot=False, first_name="Test"),
+                from_user=TgUser(id=user_id, is_bot=False, first_name=first_name),
                 chat_instance=str(user_id),
                 data=data,
                 message=Message(

@@ -18,9 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import Goal
 from models.base import TransactionType
 from services import (
+    accounts_repo,
     allocations_repo,
     goals_repo,
-    savings_repo,
     transactions_repo,
     users_repo,
 )
@@ -32,6 +32,9 @@ ADD_PROMPT = "Сумма пополнения?"
 ADD_PARSE_ERROR = "Не понял сумму. Напиши число, например: 50000"
 ADD_FORMAT_ERROR = "Формат: /savings add 50000"
 POSITIVE_ERROR = "Сумма должна быть больше нуля."
+CORRECT_FORMAT_ERROR = "Формат: /savings correct 550000"
+CORRECT_PARSE_ERROR = "Не понял сумму. Напиши число, например: 550000"
+NEGATIVE_CORRECT_ERROR = "Сумма не может быть отрицательной."
 
 ADD_BUTTON_TEXT = "➕ Пополнить"
 ALLOCATE_BUTTON_TEXT = "💰 Распределить"
@@ -92,7 +95,7 @@ def format_savings_text(
 async def _apply_amount(
     message: Message, session: AsyncSession, raw: str
 ) -> None:
-    """Пополняет копилку: свободные деньги ≥ сумма, минус из free_money."""
+    """Пополняет копилку: переводит сумму с карты на копилку."""
     if message.from_user is None:
         return
     try:
@@ -104,27 +107,27 @@ async def _apply_amount(
         await message.answer(POSITIVE_ERROR)
         return
 
-    user = await users_repo.get_or_create(session, message.from_user.id)
-    free_money = user.free_money or 0
-    if amount > free_money:
+    telegram_id = message.from_user.id
+    await users_repo.get_or_create(session, telegram_id)
+    card = await accounts_repo.ensure_account(session, telegram_id, "card")
+    if amount > card.balance:
         await message.answer(
-            f"Недостаточно свободных денег. Свободно: {format_amount(free_money)}"
+            f"Недостаточно свободных денег. Свободно: {format_amount(card.balance)}"
         )
         return
 
-    user.free_money = free_money - amount
-    await session.commit()
-
-    balance = await savings_repo.add_to_savings(session, message.from_user.id, amount)
+    savings = await accounts_repo.ensure_account(session, telegram_id, "savings")
+    _, balance = await accounts_repo.transfer_card_to_savings(
+        session, telegram_id, amount
+    )
     await transactions_repo.add_transaction(
         session,
-        message.from_user.id,
+        telegram_id,
         TransactionType.SAVINGS_ADD.value,
         amount,
+        savings.id,
     )
-    free_savings = await savings_repo.get_free_in_savings(
-        session, message.from_user.id
-    )
+    free_savings = await allocations_repo.get_free_in_savings(session, telegram_id)
     await message.answer(
         f"Пополнено: {format_amount(amount)}\n"
         f"Копилка: {format_amount(balance)}\n"
@@ -132,12 +135,42 @@ async def _apply_amount(
     )
 
 
+async def _apply_correction(
+    message: Message, session: AsyncSession, raw: str
+) -> None:
+    """Выравнивает баланс копилки и пишет операцию correction."""
+    if message.from_user is None:
+        return
+    try:
+        new_balance = parse_amount(raw)
+    except ValueError:
+        await message.answer(CORRECT_PARSE_ERROR)
+        return
+    if new_balance < 0:
+        await message.answer(NEGATIVE_CORRECT_ERROR)
+        return
+
+    telegram_id = message.from_user.id
+    await users_repo.get_or_create(session, telegram_id)
+    savings = await accounts_repo.ensure_account(session, telegram_id, "savings")
+    old_balance = savings.balance
+    await accounts_repo.correct_balance(session, savings.id, new_balance)
+    await transactions_repo.add_transaction(
+        session,
+        telegram_id,
+        TransactionType.CORRECTION.value,
+        new_balance - old_balance,
+        savings.id,
+    )
+    await message.answer(f"Копилка обновлена: {format_amount(new_balance)}")
+
+
 async def _show_savings(message: Message, session: AsyncSession) -> None:
     """Показывает копилку с распределением."""
     if message.from_user is None:
         return
     telegram_id = message.from_user.id
-    balance = await savings_repo.get_savings(session, telegram_id)
+    balance = await accounts_repo.get_balance(session, telegram_id, "savings")
     if balance <= 0:
         await message.answer(NO_SAVINGS_TEXT, reply_markup=_manage_keyboard())
         return
@@ -146,7 +179,7 @@ async def _show_savings(message: Message, session: AsyncSession) -> None:
     allocated = await allocations_repo.get_allocations_by_user(
         session, telegram_id
     )
-    free = await savings_repo.get_free_in_savings(session, telegram_id)
+    free = await allocations_repo.get_free_in_savings(session, telegram_id)
     await message.answer(
         format_savings_text(goals, allocated, balance, free),
         reply_markup=_manage_keyboard(),
@@ -156,14 +189,21 @@ async def _show_savings(message: Message, session: AsyncSession) -> None:
 async def cmd_savings(
     message: Message, command: CommandObject, session: AsyncSession
 ) -> None:
-    """Команда /savings: показывает копилку или пополняет её (/savings add N)."""
+    """Команда /savings: показывает копилку либо add/correct суммы."""
     args = (command.args or "").strip()
     if args:
         parts = args.split(maxsplit=1)
-        if parts[0].lower() != "add" or len(parts) != 2:
-            await message.answer(ADD_FORMAT_ERROR)
+        subcommand = parts[0].lower()
+        if subcommand == "add" and len(parts) == 2:
+            await _apply_amount(message, session, parts[1])
             return
-        await _apply_amount(message, session, parts[1])
+        if subcommand == "correct" and len(parts) == 2:
+            await _apply_correction(message, session, parts[1])
+            return
+        if subcommand == "correct":
+            await message.answer(CORRECT_FORMAT_ERROR)
+            return
+        await message.answer(ADD_FORMAT_ERROR)
         return
     await _show_savings(message, session)
 

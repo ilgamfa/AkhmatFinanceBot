@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -30,6 +30,9 @@ from utils.money import format_amount, format_rubles, parse_amount
 
 NO_GOALS_TEXT = "У тебя пока нет целей"
 GOAL_NOT_FOUND_TEXT = "Цель не найдена"
+ALLOCATE_FORMAT_ERROR = "Формат: /goals allocate 1 50000"
+INSUFFICIENT_TEXT = "Недостаточно свободных денег в копилке. Свободно: {amount}"
+POSITIVE_ERROR = "Сумма должна быть больше нуля."
 GOAL_DONE_PREFIX = "Цель добавлена: "
 GOAL_UPDATED_PREFIX = "Цель обновлена: "
 GOAL_DELETED_PREFIX = "Цель удалена: "
@@ -203,20 +206,71 @@ def format_goals_list(
     return "\n".join(lines)
 
 
-async def cmd_goals(message: Message, session: AsyncSession) -> None:
-    """Показывает список целей с кнопками управления."""
+async def cmd_goals(
+    message: Message, command: CommandObject, session: AsyncSession
+) -> None:
+    """Показывает список целей; ``/goals allocate <id> <сумма>`` закрепляет деньги."""
     if message.from_user is None:
+        return
+
+    args = (command.args or "").strip()
+    if args:
+        await _handle_allocate_command(message, session, args)
         return
 
     goals = await goals_repo.get_goals(session, message.from_user.id)
     if not goals:
         await message.answer(NO_GOALS_TEXT, reply_markup=_empty_keyboard())
         return
-    allocated = await allocations_repo.get_allocations_by_user(
-        session, message.from_user.id
+    progress = await goals_repo.get_progress_by_goals(
+        session, [goal.id for goal in goals]
     )
     await message.answer(
-        format_goals_list(goals, allocated), reply_markup=_manage_keyboard()
+        format_goals_list(goals, progress), reply_markup=_manage_keyboard()
+    )
+
+
+async def _handle_allocate_command(
+    message: Message, session: AsyncSession, args: str
+) -> None:
+    """Разбирает /goals allocate <id> <сумма>."""
+    if message.from_user is None:
+        return
+    parts = args.split()
+    if parts[0].lower() != "allocate" or len(parts) != 3:
+        await message.answer(ALLOCATE_FORMAT_ERROR)
+        return
+    try:
+        goal_id = int(parts[1])
+        amount = parse_amount(parts[2])
+    except ValueError:
+        await message.answer(ALLOCATE_FORMAT_ERROR)
+        return
+    if amount <= 0:
+        await message.answer(POSITIVE_ERROR)
+        return
+
+    telegram_id = message.from_user.id
+    goal = await goals_repo.get_goal(session, telegram_id, goal_id)
+    if goal is None:
+        await message.answer(GOAL_NOT_FOUND_TEXT)
+        return
+    try:
+        progress = await allocations_repo.allocate(
+            session, goal_id, amount, telegram_id
+        )
+    except ValueError:
+        free_now = await allocations_repo.get_free_in_savings(session, telegram_id)
+        await message.answer(INSUFFICIENT_TEXT.format(amount=format_amount(free_now)))
+        return
+
+    free_after = await allocations_repo.get_free_in_savings(session, telegram_id)
+    percent = goal_progress_percent(progress, goal.target)
+    await message.answer(
+        f"Закреплено за целью «{goal.name}»: {format_amount(amount)}\n"
+        f"Прогресс: {format_rubles(progress)} / {format_rubles(goal.target)} ₽ "
+        f"({percent}%)\n"
+        f"Свободно в моей копилке: {format_amount(free_after)}"
     )
 
 

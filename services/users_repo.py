@@ -29,13 +29,14 @@ async def save_onboarding_profile(
     session: AsyncSession,
     user: User,
     *,
-    free_money: int,
     income_type: str,
     income_dates: str | None = None,
     income: int | None = None,
 ) -> User:
-    """Сохраняет профиль из онбординга и помечает его пройденным."""
-    user.free_money = free_money
+    """Сохраняет профиль из онбординга и помечает его пройденным.
+
+    Свободные деньги живут на карточном счёте (см. ``accounts_repo``).
+    """
     user.income_type = income_type
     user.income_dates = income_dates
     user.income = income
@@ -54,19 +55,51 @@ async def skip_onboarding(session: AsyncSession, user: User) -> User:
 
 
 async def delete_user(session: AsyncSession, telegram_id: int) -> None:
-    """Удаляет пользователя и связанные данные (транзакции, долги, цели,
-    копилку и связи)."""
-    from models import Allocation, Debt, Goal, Savings, Transaction
+    """Удаляет пользователя и связанные данные.
+
+    Счета, транзакции, долги, связи, личные цели и членство в семье.
+    Если семья осталась без участников — удаляется вместе со своими целями.
+    """
+    from models import (
+        Account,
+        Allocation,
+        Debt,
+        Family,
+        FamilyMember,
+        Goal,
+        Transaction,
+    )
+    from services import family_repo
+
+    family = await family_repo.get_family(session, telegram_id)
+    if family is not None:
+        members = await family_repo.get_family_members(session, family.id)
+        others = [m for m in members if m.telegram_id != telegram_id]
+        if not others:
+            goal_ids = select(Goal.id).where(Goal.family_id == family.id)
+            await session.execute(
+                delete(Allocation).where(Allocation.goal_id.in_(goal_ids))
+            )
+            await session.execute(delete(Goal).where(Goal.family_id == family.id))
+            await session.execute(
+                delete(Family).where(Family.id == family.id)
+            )
+    await session.execute(
+        delete(FamilyMember).where(FamilyMember.telegram_id == telegram_id)
+    )
 
     goal_ids = select(Goal.id).where(Goal.telegram_id == telegram_id)
     await session.execute(
-        delete(Allocation).where(Allocation.goal_id.in_(goal_ids))
+        delete(Allocation).where(
+            (Allocation.goal_id.in_(goal_ids))
+            | (Allocation.telegram_id == telegram_id)
+        )
     )
     await session.execute(
         delete(Transaction).where(Transaction.telegram_id == telegram_id)
     )
     await session.execute(delete(Debt).where(Debt.telegram_id == telegram_id))
     await session.execute(delete(Goal).where(Goal.telegram_id == telegram_id))
-    await session.execute(delete(Savings).where(Savings.telegram_id == telegram_id))
+    await session.execute(delete(Account).where(Account.telegram_id == telegram_id))
     await session.execute(delete(User).where(User.telegram_id == telegram_id))
     await session.commit()

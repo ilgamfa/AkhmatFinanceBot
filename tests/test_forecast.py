@@ -10,10 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from handlers.forecast import build_forecast_text
 from models import User
 from services import (
+    accounts_repo,
     allocations_repo,
     debts_repo,
     goals_repo,
-    savings_repo,
     users_repo,
 )
 from services.calculations import dump_income_dates
@@ -27,13 +27,14 @@ FIXED_TODAY = date(2026, 9, 20)
 async def _profile_user(session: AsyncSession, user_id: int = 1) -> User:
     """Создаёт пользователя с фиксированным профилем («20 числа — 50000 ₽»)."""
     user = await users_repo.get_or_create(session, user_id)
-    return await users_repo.save_onboarding_profile(
+    user = await users_repo.save_onboarding_profile(
         session,
         user,
-        free_money=12000,
         income_type="fixed",
         income_dates=dump_income_dates([(20, 50000)]),
     )
+    await accounts_repo.create_accounts(session, user_id, card_balance=12000)
+    return user
 
 
 async def test_forecast_calculates_exact(session: AsyncSession) -> None:
@@ -43,9 +44,10 @@ async def test_forecast_calculates_exact(session: AsyncSession) -> None:
     """
     user = await _profile_user(session)
     await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    await savings_repo.add_to_savings(session, 1, 50000)
+    savings = await accounts_repo.ensure_account(session, 1, "savings")
+    await accounts_repo.correct_balance(session, savings.id, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, "2027-12-25", 1)
-    await allocations_repo.allocate(session, goal.id, 50000)
+    await allocations_repo.allocate(session, goal.id, 50000, 1)
 
     text = await build_forecast_text(session, user, today=FIXED_TODAY)
     assert "Прогноз на ближайший месяц:" in text
@@ -61,9 +63,10 @@ async def test_forecast_goal_without_deadline_excluded(session: AsyncSession) ->
     """Цели без срока не добавляют «нужно в месяц» в прогноз."""
     user = await _profile_user(session)
     await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    await savings_repo.add_to_savings(session, 1, 50000)
+    savings = await accounts_repo.ensure_account(session, 1, "savings")
+    await accounts_repo.correct_balance(session, savings.id, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 50000)
+    await allocations_repo.allocate(session, goal.id, 50000, 1)
 
     text = await build_forecast_text(session, user, today=FIXED_TODAY)
     assert "Отложить на цели: 0 ₽" in text

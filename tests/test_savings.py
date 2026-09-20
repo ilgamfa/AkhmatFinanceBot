@@ -1,4 +1,4 @@
-"""Тесты копилки, /savings и распределения (Фаза 4)."""
+"""Тесты копилки, /savings и распределения (Фазы 4–5)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services import (
+    accounts_repo,
     allocations_repo,
     goals_repo,
-    savings_repo,
     transactions_repo,
     users_repo,
 )
@@ -31,38 +31,42 @@ def _button_labels(bot: object) -> list[str]:
 # --- 4.1 репозиторий копилки и связей -----------------------------------------
 
 
-async def test_add_to_savings_creates_and_accumulates(session: AsyncSession) -> None:
-    balance = await savings_repo.add_to_savings(session, 1, 200000)
-    assert balance == 200000
-    balance = await savings_repo.add_to_savings(session, 1, 10000)
-    assert balance == 210000
+async def test_transfer_card_to_savings_accumulates(session: AsyncSession) -> None:
+    await accounts_repo.create_accounts(session, 1, card_balance=300000)
 
-    assert await savings_repo.get_savings(session, 1) == 210000
-    assert await savings_repo.get_savings(session, 2) == 0
+    _, savings = await accounts_repo.transfer_card_to_savings(session, 1, 200000)
+    assert savings == 200000
+    _, savings = await accounts_repo.transfer_card_to_savings(session, 1, 10000)
+    assert savings == 210000
+
+    assert await accounts_repo.get_balance(session, 1, "savings") == 210000
+    assert await accounts_repo.get_balance(session, 2, "savings") == 0
 
 
-async def test_add_to_savings_rejects_non_positive(session: AsyncSession) -> None:
+async def test_transfer_rejects_non_positive(session: AsyncSession) -> None:
+    await accounts_repo.create_accounts(session, 1, card_balance=1000)
     with pytest.raises(ValueError):
-        await savings_repo.add_to_savings(session, 1, 0)
+        await accounts_repo.transfer_card_to_savings(session, 1, 0)
 
 
 async def test_get_free_in_savings(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await accounts_repo.create_accounts(session, 1, card_balance=550000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
     goal2 = await goals_repo.add_goal(session, 1, "Подушка", 300000, None, 2)
-    await allocations_repo.allocate(session, goal.id, 400000)
-    await allocations_repo.allocate(session, goal2.id, 150000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
+    await allocations_repo.allocate(session, goal2.id, 150000, 1)
 
-    assert await savings_repo.get_allocated_total(session, 1) == 550000
-    assert await savings_repo.get_free_in_savings(session, 1) == 0
-    assert await savings_repo.get_free_in_savings(session, 2) == 0
+    assert await allocations_repo.get_free_in_savings(session, 1) == 0
+    assert await allocations_repo.get_free_in_savings(session, 2) == 0
 
 
 async def test_allocate_saves_and_returns_progress(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await accounts_repo.create_accounts(session, 1, card_balance=550000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
 
-    progress = await allocations_repo.allocate(session, goal.id, 400000)
+    progress = await allocations_repo.allocate(session, goal.id, 400000, 1)
     assert progress == 400000
     assert await goals_repo.get_goal_progress(session, goal.id) == 400000
 
@@ -72,32 +76,34 @@ async def test_allocate_saves_and_returns_progress(session: AsyncSession) -> Non
 
 
 async def test_allocate_denies_exceeding_free(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 50000)
+    await accounts_repo.create_accounts(session, 1, card_balance=50000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
 
     with pytest.raises(ValueError):
-        await allocations_repo.allocate(session, goal.id, 50001)
+        await allocations_repo.allocate(session, goal.id, 50001, 1)
     with pytest.raises(ValueError):
-        await allocations_repo.allocate(session, goal.id, 0)
+        await allocations_repo.allocate(session, goal.id, 0, 1)
     assert await goals_repo.get_goal_progress(session, goal.id) == 0
 
     # всё свободное занято — повторная попытка тоже падает
-    await allocations_repo.allocate(session, goal.id, 50000)
+    await allocations_repo.allocate(session, goal.id, 50000, 1)
     with pytest.raises(ValueError):
-        await allocations_repo.allocate(session, goal.id, 1)
+        await allocations_repo.allocate(session, goal.id, 1, 1)
 
 
 async def test_unallocate_withdraws_partially(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 100000)
+    await accounts_repo.create_accounts(session, 1, card_balance=100000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 100000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 60000)
-    await allocations_repo.allocate(session, goal.id, 30000)
+    await allocations_repo.allocate(session, goal.id, 60000, 1)
+    await allocations_repo.allocate(session, goal.id, 30000, 1)
 
     progress = await allocations_repo.unallocate(session, goal.id, 50000)
     assert progress == 40000
 
     assert await goals_repo.get_goal_progress(session, goal.id) == 40000
-    assert await savings_repo.get_free_in_savings(session, 1) == 60000
+    assert await allocations_repo.get_free_in_savings(session, 1) == 60000
     allocations = await allocations_repo.get_allocations_by_goal(session, goal.id)
     assert sum(allocation.amount for allocation in allocations) == 40000
 
@@ -126,9 +132,10 @@ async def test_savings_empty_shows_empty_text(
 async def test_savings_shows_balance_and_allocations(
     send_message: Send, session: AsyncSession, bot: object
 ) -> None:
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await accounts_repo.create_accounts(session, 1, card_balance=550000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
 
     text = (await send_message("/savings"))[0]
     assert "Копилка: 550 000 ₽" in text
@@ -143,7 +150,8 @@ async def test_savings_shows_balance_and_allocations(
 async def test_savings_hides_allocations_when_none(
     send_message: Send, session: AsyncSession
 ) -> None:
-    await savings_repo.add_to_savings(session, 1, 100000)
+    await accounts_repo.create_accounts(session, 1, card_balance=100000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 100000)
     text = (await send_message("/savings"))[0]
     assert "Копилка: 100 000 ₽" in text
     assert "Закреплено за целями:" not in text
@@ -156,8 +164,9 @@ async def test_savings_hides_allocations_when_none(
 async def _with_free_money(session: AsyncSession, amount: int) -> None:
     user = await users_repo.get_or_create(session, 1)
     await users_repo.save_onboarding_profile(
-        session, user, free_money=amount, income_type="fixed", income_dates="[]"
+        session, user, income_type="fixed", income_dates="[]"
     )
+    await accounts_repo.create_accounts(session, 1, card_balance=amount)
 
 
 async def test_savings_add_via_command(
@@ -171,10 +180,8 @@ async def test_savings_add_via_command(
     assert "Свободно: 50 000 ₽" in text
 
     session.expire_all()
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 0
-    assert await savings_repo.get_savings(session, 1) == 50000
+    assert await accounts_repo.get_balance(session, 1, "card") == 0
+    assert await accounts_repo.get_balance(session, 1, "savings") == 50000
 
     transactions = await transactions_repo.get_last_transactions(session, 1, 1)
     assert transactions[0].type == "savings_add"
@@ -195,7 +202,7 @@ async def test_savings_add_via_button(
     assert "Копилка: 20 000 ₽" in text
 
     session.expire_all()
-    assert await savings_repo.get_savings(session, 1) == 20000
+    assert await accounts_repo.get_balance(session, 1, "savings") == 20000
 
 
 async def test_savings_add_insufficient_free_money(
@@ -204,11 +211,11 @@ async def test_savings_add_insufficient_free_money(
     await _with_free_money(session, 5000)
     text = (await send_message("/savings add 10000"))[0]
     assert "Недостаточно свободных денег. Свободно: 5 000 ₽" in text
-    assert await savings_repo.get_savings(session, 1) == 0
+    assert await accounts_repo.get_balance(session, 1, "savings") == 0
 
 
 async def test_savings_add_no_profile(send_message: Send) -> None:
-    """Без онбординга free_money = 0 — пополнение невозможно."""
+    """Без онбординга карта пуста — пополнение невозможно."""
     text = (await send_message("/savings add 100"))[0]
     assert "Недостаточно свободных денег" in text
 
@@ -220,15 +227,44 @@ async def test_savings_add_bad_input(send_message: Send) -> None:
     assert "Не понял сумму" in replies[0]
 
 
+# --- 5.6 корректировка копилки ------------------------------------------------
+
+
+async def test_savings_correct_sets_balance(
+    send_message: Send, session: AsyncSession
+) -> None:
+    await _with_free_money(session, 10000)
+
+    text = (await send_message("/savings correct 550000"))[0]
+    assert "Копилка обновлена: 550 000 ₽" in text
+
+    session.expire_all()
+    assert await accounts_repo.get_balance(session, 1, "savings") == 550000
+    # корректировка не трогает карту
+    assert await accounts_repo.get_balance(session, 1, "card") == 10000
+
+    transactions = await transactions_repo.get_last_transactions(session, 1, 1)
+    assert transactions[0].type == "correction"
+    assert transactions[0].amount == 550000
+
+
+async def test_savings_correct_bad_input(send_message: Send) -> None:
+    replies = await send_message("/savings correct")
+    assert "Формат: /savings correct 550000" in replies[0]
+    replies = await send_message("/savings correct абв")
+    assert "Не понял сумму" in replies[0]
+
+
 # --- 4.5 распределение --------------------------------------------------------
 
 
 async def test_allocate_flow_success(
     send_message: Send, send_callback: Press, session: AsyncSession, bot: object
 ) -> None:
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await accounts_repo.create_accounts(session, 1, card_balance=550000)
+    await accounts_repo.transfer_card_to_savings(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
     goal_id = goal.id
     session.expire_all()
 

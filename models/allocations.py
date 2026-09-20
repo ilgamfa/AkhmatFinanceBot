@@ -15,5 +15,7 @@ class Allocation(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     goal_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # Кто закрепил деньги (из своей копилки).
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     # Сумма из копилки, закреплённая за целью.
     amount: Mapped[int] = mapped_column(Integer)

@@ -15,6 +15,8 @@ class Transaction(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    # Счёт операции (карта или копилка); NULL, если счёт неизвестен.
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     type: Mapped[str] = mapped_column(
         String(16), default=TransactionType.EXPENSE.value
     )

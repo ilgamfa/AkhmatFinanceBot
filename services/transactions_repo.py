@@ -23,10 +23,12 @@ async def add_transaction(
     telegram_id: int,
     transaction_type: str,
     amount: int,
+    account_id: int | None = None,
 ) -> Transaction:
     """Записывает операцию и возвращает её."""
     transaction = Transaction(
         telegram_id=telegram_id,
+        account_id=account_id,
         type=transaction_type,
         amount=amount,
         created_at=_now_iso(),
@@ -44,6 +46,19 @@ async def get_last_transactions(
     result = await session.execute(
         select(Transaction)
         .where(Transaction.telegram_id == telegram_id)
+        .order_by(Transaction.id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def get_last_family_transactions(
+    session: AsyncSession, telegram_ids: list[int], limit: int = 5
+) -> list[Transaction]:
+    """Последние операции всех участников семьи (сначала новые)."""
+    result = await session.execute(
+        select(Transaction)
+        .where(Transaction.telegram_id.in_(telegram_ids))
         .order_by(Transaction.id.desc())
         .limit(limit)
     )
@@ -96,6 +111,34 @@ async def get_balance_by_period(
         select(Transaction.type, func.coalesce(func.sum(Transaction.amount), 0))
         .where(
             Transaction.telegram_id == telegram_id,
+            Transaction.created_at >= start_iso,
+        )
+        .group_by(Transaction.type)
+    )
+    balance = 0
+    for transaction_type, total in result.all():
+        if transaction_type in (
+            TransactionType.EXPENSE.value,
+            TransactionType.SAVINGS_ADD.value,
+        ):
+            balance -= int(total)
+        else:
+            balance += int(total)
+    return balance
+
+
+async def get_family_balance_by_period(
+    session: AsyncSession, telegram_ids: list[int], period: str
+) -> int:
+    """Сальдо за период по всем участникам семьи."""
+    if period not in VALID_PERIODS:
+        raise ValueError(f"Неизвестный период: {period}")
+
+    start_iso = _period_start(period).isoformat()
+    result = await session.execute(
+        select(Transaction.type, func.coalesce(func.sum(Transaction.amount), 0))
+        .where(
+            Transaction.telegram_id.in_(telegram_ids),
             Transaction.created_at >= start_iso,
         )
         .group_by(Transaction.type)

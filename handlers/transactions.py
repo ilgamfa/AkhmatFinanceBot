@@ -10,7 +10,7 @@ from aiogram.types import ForceReply, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.base import TransactionType
-from services import transactions_repo, users_repo
+from services import accounts_repo, transactions_repo, users_repo
 from utils.money import format_amount, parse_amount, parse_amount_unsigned
 
 MINUS_PROMPT = "Напиши сумму траты. Например: 5000"
@@ -40,17 +40,23 @@ def _force_reply(prompt: str) -> ForceReply:
 async def _apply_expense(
     message: Message, session: AsyncSession, amount: int
 ) -> None:
-    """Списывает сумму и пишет операцию expense."""
+    """Списывает сумму с карты и пишет операцию expense."""
     if message.from_user is None:
         return
 
-    user = await users_repo.get_or_create(session, message.from_user.id)
-    balance = (user.free_money or 0) - amount
-    user.free_money = balance
+    await users_repo.get_or_create(session, message.from_user.id)
+    card = await accounts_repo.ensure_account(session, message.from_user.id, "card")
+    balance = card.balance - amount
+    card.balance = balance
     await session.commit()
+    await session.refresh(card)
 
     await transactions_repo.add_transaction(
-        session, message.from_user.id, TransactionType.EXPENSE.value, amount
+        session,
+        message.from_user.id,
+        TransactionType.EXPENSE.value,
+        amount,
+        card.id,
     )
 
     await message.answer(
@@ -63,17 +69,23 @@ async def _apply_expense(
 async def _apply_income(
     message: Message, session: AsyncSession, amount: int
 ) -> None:
-    """Начисляет сумму и пишет операцию income."""
+    """Начисляет сумму на карту и пишет операцию income."""
     if message.from_user is None:
         return
 
-    user = await users_repo.get_or_create(session, message.from_user.id)
-    balance = (user.free_money or 0) + amount
-    user.free_money = balance
+    await users_repo.get_or_create(session, message.from_user.id)
+    card = await accounts_repo.ensure_account(session, message.from_user.id, "card")
+    balance = card.balance + amount
+    card.balance = balance
     await session.commit()
+    await session.refresh(card)
 
     await transactions_repo.add_transaction(
-        session, message.from_user.id, TransactionType.INCOME.value, amount
+        session,
+        message.from_user.id,
+        TransactionType.INCOME.value,
+        amount,
+        card.id,
     )
 
     await message.answer(
@@ -84,20 +96,23 @@ async def _apply_income(
 async def _apply_correction(
     message: Message, session: AsyncSession, new_balance: int
 ) -> None:
-    """Задаёт новый баланс и пишет операцию correction с разницей."""
+    """Задаёт новый баланс карты и пишет операцию correction с разницей."""
     if message.from_user is None:
         return
 
-    user = await users_repo.get_or_create(session, message.from_user.id)
-    old_balance = user.free_money or 0
-    user.free_money = new_balance
+    await users_repo.get_or_create(session, message.from_user.id)
+    card = await accounts_repo.ensure_account(session, message.from_user.id, "card")
+    old_balance = card.balance
+    card.balance = new_balance
     await session.commit()
+    await session.refresh(card)
 
     await transactions_repo.add_transaction(
         session,
         message.from_user.id,
         TransactionType.CORRECTION.value,
         new_balance - old_balance,
+        card.id,
     )
 
     await message.answer(f"Баланс обновлён: {format_amount(new_balance)}")

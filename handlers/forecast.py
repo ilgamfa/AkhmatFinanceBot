@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import User
 from models.base import IncomeType
 from services import (
+    accounts_repo,
     allocations_repo,
     debts_repo,
     goals_repo,
@@ -52,7 +53,7 @@ async def build_forecast_text(
 ) -> str:
     """Собирает текст прогноза: свободно + доход − долги − цели."""
     today = today or datetime.now(UTC).date()
-    free_money = user.free_money or 0
+    free_money = await accounts_repo.get_balance(session, user.telegram_id, "card")
     income = income_until_month_end(user, today)
 
     month_end = end_of_month(today)

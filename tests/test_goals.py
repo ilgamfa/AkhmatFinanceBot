@@ -8,7 +8,7 @@ from datetime import date
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import allocations_repo, goals_repo, savings_repo
+from services import accounts_repo, allocations_repo, goals_repo
 from services.calculations import (
     format_goal_deadline,
     goal_progress_percent,
@@ -19,6 +19,12 @@ from services.calculations import (
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
+
+
+async def _fund(session: AsyncSession, telegram_id: int, amount: int) -> None:
+    """Кладёт сумму на копилку пользователя."""
+    savings = await accounts_repo.ensure_account(session, telegram_id, "savings")
+    await accounts_repo.correct_balance(session, savings.id, amount)
 
 
 def _button_labels(bot: object) -> list[str]:
@@ -88,25 +94,25 @@ async def test_update_goal(session: AsyncSession) -> None:
 
 
 async def test_get_goal_progress_from_allocations(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 500000)
+    await _fund(session, 1, 500000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
 
     assert await goals_repo.get_goal_progress(session, goal.id) == 0
-    await allocations_repo.allocate(session, goal.id, 400000)
-    await allocations_repo.allocate(session, goal.id, 70000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
+    await allocations_repo.allocate(session, goal.id, 70000, 1)
     assert await goals_repo.get_goal_progress(session, goal.id) == 470000
 
 
 async def test_delete_goal_removes_allocations(session: AsyncSession) -> None:
-    await savings_repo.add_to_savings(session, 1, 500000)
+    await _fund(session, 1, 500000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
 
     assert await goals_repo.delete_goal(session, 1, goal.id) is True
     # связи удалены — деньги вернулись в свободные копилки
     assert await allocations_repo.get_allocations_by_goal(session, goal.id) == []
     assert await goals_repo.get_goals(session, 1) == []
-    assert await savings_repo.get_free_in_savings(session, 1) == 500000
+    assert await allocations_repo.get_free_in_savings(session, 1) == 500000
 
     assert await goals_repo.delete_goal(session, 1, goal.id) is False
 
@@ -129,9 +135,9 @@ async def test_goals_empty_shows_add_button_only(
 async def test_goals_shows_list_and_buttons(
     send_message: Send, session: AsyncSession, bot: object
 ) -> None:
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await _fund(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, "2027-12-01", 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
     await goals_repo.add_goal(session, 1, "Подушка", 300000, "2027-06-01", 2)
 
     text = (await send_message("/goals"))[0]
@@ -316,9 +322,9 @@ async def test_goals_delete_flow(
 async def test_goals_delete_returns_money_to_free(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
-    await savings_repo.add_to_savings(session, 1, 500000)
+    await _fund(session, 1, 500000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
     goal_id = goal.id
     session.expire_all()
 
@@ -326,7 +332,7 @@ async def test_goals_delete_returns_money_to_free(
 
     session.expire_all()
     assert await goals_repo.get_goals(session, 1) == []
-    assert await savings_repo.get_free_in_savings(session, 1) == 500000
+    assert await allocations_repo.get_free_in_savings(session, 1) == 500000
 
 
 async def test_goals_delete_cancel(
@@ -350,3 +356,87 @@ async def test_goals_edit_delete_when_empty(
 ) -> None:
     assert "нет целей" in (await send_callback("goals:edit"))[0]
     assert "нет целей" in (await send_callback("goals:del"))[0]
+
+
+# --- 5.5 общие цели и /goals allocate -----------------------------------------
+
+
+async def _make_family(
+    send_message: Send, session: AsyncSession, family_repo
+) -> None:  # type: ignore[no-untyped-def]
+    await send_message("/family create", user_id=1, first_name="Илья")
+    family = await family_repo.get_family(session, 1)
+    assert family is not None
+    await send_message(
+        f"/family join {family.invite_code}", user_id=2, first_name="Жена"
+    )
+
+
+async def test_family_goals_visible_to_both(
+    send_message: Send, session: AsyncSession
+) -> None:
+    from services import family_repo
+
+    await _make_family(send_message, session, family_repo)
+    goal = await goals_repo.add_goal(session, 1, "Отпуск", 500000, None, 1)
+
+    # оба участника видят одну и ту же цель
+    assert [g.id for g in await goals_repo.get_goals(session, 1)] == [goal.id]
+    assert [g.id for g in await goals_repo.get_goals(session, 2)] == [goal.id]
+    assert goal.family_id is not None
+
+    text_owner = (await send_message("/goals", user_id=1, first_name="Илья"))[0]
+    text_partner = (await send_message("/goals", user_id=2, first_name="Жена"))[0]
+    assert "Отпуск" in text_owner
+    assert "Отпуск" in text_partner
+
+
+async def test_family_goal_progress_from_both_savings(
+    send_message: Send, session: AsyncSession
+) -> None:
+    from services import family_repo
+
+    await _make_family(send_message, session, family_repo)
+    await _fund(session, 1, 300000)
+    await _fund(session, 2, 100000)
+    goal = await goals_repo.add_goal(session, 1, "Отпуск", 500000, None, 1)
+
+    await allocations_repo.allocate(session, goal.id, 300000, 1)
+    await allocations_repo.allocate(session, goal.id, 100000, 2)
+
+    assert await goals_repo.get_goal_progress(session, goal.id) == 400000
+
+
+async def test_goals_allocate_command(
+    send_message: Send, session: AsyncSession
+) -> None:
+    goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+    await _fund(session, 1, 550000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
+
+    text = (await send_message(f"/goals allocate {goal.id} 50000"))[0]
+    assert "Закреплено за целью «Машина»: 50 000 ₽" in text
+    assert "Прогресс: 450 000 / 1 500 000 ₽ (30%)" in text
+    assert "Свободно в моей копилке: 100 000 ₽" in text
+
+
+async def test_goals_allocate_command_insufficient(
+    send_message: Send, session: AsyncSession
+) -> None:
+    goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
+    text = (await send_message(f"/goals allocate {goal.id} 100"))[0]
+    assert "Недостаточно свободных денег в копилке. Свободно: 0 ₽" in text
+    assert await goals_repo.get_goal_progress(session, goal.id) == 0
+
+
+async def test_goals_allocate_command_bad_format(send_message: Send) -> None:
+    text = (await send_message("/goals allocate 1"))[0]
+    assert "Формат: /goals allocate 1 50000" in text
+
+    text = (await send_message("/goals allocate x y"))[0]
+    assert "Формат: /goals allocate 1 50000" in text
+
+
+async def test_goals_allocate_command_goal_not_found(send_message: Send) -> None:
+    text = (await send_message("/goals allocate 999 100"))[0]
+    assert "Цель не найдена" in text

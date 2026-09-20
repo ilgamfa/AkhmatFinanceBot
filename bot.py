@@ -11,6 +11,7 @@ from config import BOT_TOKEN, DB_PATH
 from handlers import (
     allocate,
     debts,
+    family,
     forecast,
     goals,
     onboarding,
@@ -36,6 +37,7 @@ def create_dispatcher(database: Database) -> Dispatcher:
         goals.build_router(),
         savings.build_router(),
         allocate.build_router(),
+        family.build_router(),
         forecast.build_router(),
         stats.build_router(),
         onboarding.build_router(),

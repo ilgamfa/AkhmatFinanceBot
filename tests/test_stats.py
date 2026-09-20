@@ -1,4 +1,4 @@
-"""Тесты блоков «Копилка» и «Цели» в /stats (Фаза 4)."""
+"""Тесты блоков «Копилка» и «Цели» в /stats (Фазы 4–5)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import allocations_repo, goals_repo, savings_repo
+from services import accounts_repo, allocations_repo, family_repo, goals_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -21,15 +21,21 @@ async def _onboard(send_message: Send, send_callback: Press) -> None:
     await send_message("10, 50000")
 
 
+async def _fund_savings(session: AsyncSession, telegram_id: int, amount: int) -> None:
+    """Ставит баланс копилки пользователя."""
+    savings = await accounts_repo.ensure_account(session, telegram_id, "savings")
+    await accounts_repo.correct_balance(session, savings.id, amount)
+
+
 async def test_stats_shows_savings_and_goals(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await savings_repo.add_to_savings(session, 1, 550000)
+    await _fund_savings(session, 1, 550000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, "2027-12-01", 1)
-    await allocations_repo.allocate(session, goal.id, 400000)
+    await allocations_repo.allocate(session, goal.id, 400000, 1)
     goal2 = await goals_repo.add_goal(session, 1, "Подушка", 300000, "2027-06-01", 2)
-    await allocations_repo.allocate(session, goal2.id, 150000)
+    await allocations_repo.allocate(session, goal2.id, 150000, 1)
 
     text = (await send_message("/stats"))[0]
     assert "Копилка: 550 000 ₽" in text
@@ -70,3 +76,95 @@ async def test_stats_shows_savings_add_transaction(
     text = (await send_message("/stats"))[0]
     assert "→ Копилка: 5 000 ₽ (сегодня)" in text
     assert "За сегодня: −5 000 ₽" in text
+
+
+# --- 5.4 семейная сводка ------------------------------------------------------
+
+
+async def _onboard_user(
+    send_message: Send, send_callback: Press, *, user_id: int, first_name: str
+) -> None:
+    await send_message("/start", user_id=user_id, first_name=first_name)
+    await send_callback("onboarding:start", user_id=user_id, first_name=first_name)
+    await send_message("12000", user_id=user_id, first_name=first_name)
+    await send_callback(
+        "onboarding:income_fixed", user_id=user_id, first_name=first_name
+    )
+    await send_callback(
+        "onboarding:times_1", user_id=user_id, first_name=first_name
+    )
+    await send_message("10, 50000", user_id=user_id, first_name=first_name)
+
+
+async def _make_family(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Создаёт семью из двух пользователей через команды."""
+    await _onboard_user(send_message, send_callback, user_id=1, first_name="Илья")
+    await _onboard_user(send_message, send_callback, user_id=2, first_name="Жена")
+    await send_message("/family create", user_id=1, first_name="Илья")
+    family = await family_repo.get_family(session, 1)
+    assert family is not None
+    await send_message(
+        f"/family join {family.invite_code}", user_id=2, first_name="Жена"
+    )
+
+
+async def test_stats_family_summary(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _make_family(send_message, send_callback, session)
+    await accounts_repo.correct_balance(
+        session, (await accounts_repo.ensure_account(session, 1, "card")).id, 50000
+    )
+    await accounts_repo.correct_balance(
+        session, (await accounts_repo.ensure_account(session, 2, "card")).id, 30000
+    )
+    # копилки обоих
+    await accounts_repo.correct_balance(
+        session,
+        (await accounts_repo.ensure_account(session, 1, "savings")).id,
+        300000,
+    )
+    await accounts_repo.correct_balance(
+        session,
+        (await accounts_repo.ensure_account(session, 2, "savings")).id,
+        100000,
+    )
+    goal = await goals_repo.add_goal(session, 1, "Отпуск", 500000, None, 1)
+    await allocations_repo.allocate(session, goal.id, 300000, 1)
+    await allocations_repo.allocate(session, goal.id, 100000, 2)
+
+    text = (await send_message("/stats"))[0]
+    assert "Семья: Наша семья" in text
+    assert "Моя карта: 50 000 ₽" in text
+    assert "Карта жена: 30 000 ₽" in text
+    assert "Моя копилка: 300 000 ₽" in text
+    assert "Копилка жена: 100 000 ₽" in text
+    assert "Свободно (карты): 80 000 ₽" in text
+    assert "В копилках: 400 000 ₽" in text
+    assert "✈️ Отпуск: 400 000 / 500 000 ₽ (80%)" in text
+
+
+async def test_stats_family_shows_both_members_operations(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _make_family(send_message, send_callback, session)
+    await accounts_repo.correct_balance(
+        session, (await accounts_repo.ensure_account(session, 1, "card")).id, 50000
+    )
+    await accounts_repo.correct_balance(
+        session, (await accounts_repo.ensure_account(session, 2, "card")).id, 30000
+    )
+
+    await send_message("/minus 3000", user_id=1, first_name="Илья")
+    await send_message("/plus 50000", user_id=2, first_name="Жена")
+
+    text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
+    assert "Последние операции:" in text
+    assert "−3 000 ₽ (я, сегодня)" in text
+    assert "+50 000 ₽ (жена, сегодня)" in text
+
+    partner_text = (await send_message("/stats", user_id=2, first_name="Жена"))[0]
+    assert "−3 000 ₽ (илья, сегодня)" in partner_text
+    assert "+50 000 ₽ (я, сегодня)" in partner_text

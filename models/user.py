@@ -23,7 +23,6 @@ class User(Base):
     onboarding_completed: Mapped[bool] = mapped_column(default=False)
 
     # Профиль Фазы 1 (заполняется в онбординге).
-    free_money: Mapped[int] = mapped_column(Integer, default=0)
     income_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # JSON-строка со списком {"day": int, "amount": int} для fixed-дохода.
     income_dates: Mapped[str | None] = mapped_column(Text, nullable=True)

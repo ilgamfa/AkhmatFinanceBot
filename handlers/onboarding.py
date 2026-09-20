@@ -15,7 +15,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import IncomeType
-from services import users_repo
+from services import accounts_repo, users_repo
 from services.calculations import dump_income_dates
 from utils.money import parse_amount, parse_day_and_amount
 
@@ -260,13 +260,16 @@ async def _finish(
     income_type = data.get("income_type") or IncomeType.FIXED.value
 
     income_dates = dump_income_dates(entries) if entries else None
+    card_balance = int(data.get("free_money") or 0)
     await users_repo.save_onboarding_profile(
         session,
         user,
-        free_money=int(data.get("free_money") or 0),
         income_type=income_type,
         income_dates=income_dates,
         income=irregular_income,
+    )
+    await accounts_repo.create_accounts(
+        session, message.from_user.id, card_balance=card_balance
     )
     await state.clear()
     await message.answer(FINISH_TEXT)
