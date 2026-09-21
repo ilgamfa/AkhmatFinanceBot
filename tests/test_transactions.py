@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import users_repo
+from services import accounts_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -29,9 +29,7 @@ async def test_minus_updates_balance(
     assert "Записал: −5 000 ₽" in replies[0]
     assert "Свободно: 7 000 ₽" in replies[0]
 
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 7000
+    assert await accounts_repo.get_balance(session, 1, "card") == 7000
 
 
 async def test_minus_records_expense(
@@ -56,9 +54,7 @@ async def test_plus_updates_balance(
     assert "Записал: +100 000 ₽" in replies[0]
     assert "Свободно: 112 000 ₽" in replies[0]
 
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 112000
+    assert await accounts_repo.get_balance(session, 1, "card") == 112000
 
 
 async def test_plus_records_income(
@@ -106,9 +102,7 @@ async def test_minus_force_reply_flow(
     replies = await send_message("3000")
     assert "Записал: −3 000 ₽" in replies[0]
 
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 9000
+    assert await accounts_repo.get_balance(session, 1, "card") == 9000
 
 
 async def test_plus_force_reply_flow(
@@ -119,9 +113,7 @@ async def test_plus_force_reply_flow(
     replies = await send_message("50000")
     assert "Записал: +50 000 ₽" in replies[0]
 
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 62000
+    assert await accounts_repo.get_balance(session, 1, "card") == 62000
 
 
 async def test_minus_invalid_amount(send_message: Send, send_callback: Press) -> None:
@@ -135,9 +127,7 @@ async def test_minus_unicode_minus(
 ) -> None:
     await _onboard(send_message, send_callback)
     await send_message("/minus −1000")
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 11000
+    assert await accounts_repo.get_balance(session, 1, "card") == 11000
 
 
 async def test_minus_negative_balance_warns(
@@ -155,9 +145,7 @@ async def test_correct_updates_balance(
     replies = await send_message("/correct 12000")
     assert "Баланс обновлён: 12 000 ₽" in replies[0]
 
-    user = await users_repo.get_by_telegram_id(session, 1)
-    assert user is not None
-    assert user.free_money == 12000
+    assert await accounts_repo.get_balance(session, 1, "card") == 12000
 
 
 async def test_correct_records_difference(
@@ -194,10 +182,10 @@ async def test_stats_shows_balance_income_and_operations(
 
     replies = await send_message("/stats")
     text = replies[0]
-    assert "Свободно: 107 000 ₽" in text
+    assert "*Свободно:* 107 000 ₽" in text
     assert "Доход:" in text
     assert "10 числа — 50 000 ₽" in text
-    assert "Последние операции:" in text
+    assert "*Последние операции:*" in text
     assert "−5 000 ₽ (сегодня)" in text
     assert "+100 000 ₽ (сегодня)" in text
 
@@ -210,9 +198,9 @@ async def test_stats_shows_period_balance(
     await send_message("/plus 30800")
 
     text = (await send_message("/stats"))[0]
-    assert "За сегодня: +25 800 ₽" in text
-    assert "За неделю: +25 800 ₽" in text
-    assert "За месяц: +25 800 ₽" in text
+    assert "*За сегодня:* +25 800 ₽" in text
+    assert "*За неделю:* +25 800 ₽" in text
+    assert "*За месяц:* +25 800 ₽" in text
 
 
 async def test_stats_shows_period_sums(
@@ -223,9 +211,9 @@ async def test_stats_shows_period_sums(
     await send_message("/minus 1500")
 
     text = (await send_message("/stats"))[0]
-    assert "За сегодня: −6 500 ₽" in text
-    assert "За неделю: −6 500 ₽" in text
-    assert "За месяц: −6 500 ₽" in text
+    assert "*За сегодня:* −6 500 ₽" in text
+    assert "*За неделю:* −6 500 ₽" in text
+    assert "*За месяц:* −6 500 ₽" in text
 
 
 async def test_stats_hides_operations_when_empty(
@@ -233,8 +221,8 @@ async def test_stats_hides_operations_when_empty(
 ) -> None:
     await _onboard(send_message, send_callback)
     text = (await send_message("/stats"))[0]
-    assert "Свободно: 12 000 ₽" in text
-    assert "Последние операции:" not in text
+    assert "*Свободно:* 12 000 ₽" in text
+    assert "*Последние операции:*" not in text
     assert "За сегодня:" not in text
 
 
@@ -248,7 +236,7 @@ async def test_stats_irregular_income_line(
     await send_message("90000")
 
     text = (await send_message("/stats"))[0]
-    assert "Доход: нерегулярный" in text
+    assert "*Доход:* нерегулярный" in text
     assert "Среднее в месяц: 90 000 ₽" in text
 
 

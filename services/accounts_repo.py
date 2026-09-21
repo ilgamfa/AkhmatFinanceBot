@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models import Account, FamilyMember
 from models.account import CARD, SAVINGS
 
+DEFAULT_CARD_NAME = "Карта"
+DEFAULT_SAVINGS_NAME = "Копилка"
+
 
 def _now_iso() -> str:
     """Текущее время в ISO-формате (UTC)."""
@@ -21,6 +24,7 @@ async def create_accounts(
     telegram_id: int,
     family_id: int | None = None,
     card_balance: int = 0,
+    card_name: str = DEFAULT_CARD_NAME,
 ) -> list[Account]:
     """Создаёт карту и копилку пользователя. Повторный вызов дополняет пару."""
     existing = {
@@ -28,13 +32,18 @@ async def create_accounts(
         for account in await get_accounts(session, telegram_id)
     }
     created: list[Account] = []
-    for account_type, balance in ((CARD, card_balance), (SAVINGS, 0)):
+    setup = (
+        (CARD, card_balance, card_name),
+        (SAVINGS, 0, DEFAULT_SAVINGS_NAME),
+    )
+    for account_type, balance, name in setup:
         account = existing.get(account_type)
         if account is None:
             account = Account(
                 telegram_id=telegram_id,
                 family_id=family_id,
                 type=account_type,
+                name=name,
                 balance=balance,
                 created_at=_now_iso(),
             )

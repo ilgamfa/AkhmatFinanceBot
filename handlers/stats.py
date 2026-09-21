@@ -13,7 +13,6 @@ from models import Transaction, User
 from models.base import IncomeType, TransactionType
 from services import (
     accounts_repo,
-    allocations_repo,
     debts_repo,
     family_repo,
     goals_repo,
@@ -33,6 +32,13 @@ router = Router(name="stats")
 LAST_LIMIT = 5
 UPCOMING_DAYS = 30
 
+_MD_SPECIAL = str.maketrans({char: f"\\{char}" for char in "_*`["})
+
+
+def escape_markdown(text: str) -> str:
+    """Экранирует спецсимволы legacy-Markdown в имени пользователя."""
+    return text.translate(_MD_SPECIAL)
+
 
 def format_income_lines(user: User) -> list[str]:
     """Строки блока «Доход». Пустой список — блок скрывается.
@@ -42,14 +48,14 @@ def format_income_lines(user: User) -> list[str]:
     if user.income_type == IncomeType.IRREGULAR.value:
         if user.income:
             return [
-                "Доход: нерегулярный",
+                "*Доход:* нерегулярный",
                 f"Среднее в месяц: {format_amount(user.income)}",
             ]
         return []
     entries = parse_income_dates(user.income_dates)
     if not entries:
         return []
-    lines = ["Доход:"]
+    lines = ["*Доход:*"]
     for day, amount in sorted(entries, key=lambda item: item[0]):
         lines.append(f"{day} числа — {format_amount(amount)}")
     return lines
@@ -84,18 +90,19 @@ def format_transaction_line(transaction: Transaction, today: date) -> str:
 
 
 def _period_line(title: str, amount: int) -> str:
-    """Строка «За период» со знаком сальдо: «За сегодня: +25 800 ₽»."""
+    """Строка «За период» со знаком сальдо: «*За сегодня:* +25 800 ₽»."""
     if amount > 0:
-        return f"{title}: +{format_amount(amount)}"
+        return f"*{title}:* +{format_amount(amount)}"
     if amount < 0:
-        return f"{title}: −{format_amount(abs(amount))}"
-    return f"{title}: {format_amount(0)}"
+        return f"*{title}:* −{format_amount(abs(amount))}"
+    return f"*{title}:* {format_amount(0)}"
 
 
 def format_payment_line(payment_date: date, debt: object) -> str:
     """Строка ближайшего платежа: «25.09 — Кредит: 46 000 ₽»."""
     return (
-        f"{payment_date.strftime('%d.%m')} — {debt.name}: "  # type: ignore[attr-defined]
+        f"{payment_date.strftime('%d.%m')} — "
+        f"{escape_markdown(debt.name)}: "  # type: ignore[attr-defined]
         f"{format_amount(debt.amount)}"  # type: ignore[attr-defined]
     )
 
@@ -128,7 +135,7 @@ async def build_solo_stats_text(
     """Собирает текст сводки для пользователя без семьи."""
     today = today or datetime.now(UTC).date()
     free_money = await accounts_repo.get_balance(session, user.telegram_id, "card")
-    lines = [f"Свободно: {format_amount(free_money)}"]
+    lines = [f"*Свободно:* {format_amount(free_money)}"]
 
     income_lines = format_income_lines(user)
     if income_lines:
@@ -140,7 +147,7 @@ async def build_solo_stats_text(
     )
     if upcoming:
         lines.append("")
-        lines.append("Ближайшие платежи:")
+        lines.append("*Ближайшие платежи:*")
         lines.extend(
             format_payment_line(payment_date, debt)
             for payment_date, debt in upcoming
@@ -169,10 +176,11 @@ async def build_solo_stats_text(
         lines.append("")
         if salary_date is not None:
             lines.append(
-                f"Свободно до ЗП: {format_amount(free_money - until_salary)}"
+                f"*Свободно до ЗП:* "
+                f"{format_amount(free_money - until_salary)}"
             )
         lines.append(
-            f"Свободно до конца месяца: "
+            f"*Свободно до конца месяца:* "
             f"{format_amount(free_money - until_month_end)}"
         )
 
@@ -186,14 +194,14 @@ async def build_solo_stats_text(
 
     if savings_balance > 0:
         lines.append("")
-        lines.append(f"Копилка: {format_amount(savings_balance)}")
+        lines.append(f"*Копилка:* {format_amount(savings_balance)}")
     if goals:
         lines.append("")
-        lines.append("Цели:")
+        lines.append("*Цели:*")
         for goal in goals:
             percent = goal_progress_percent(progress.get(goal.id, 0), goal.target)
             lines.append(
-                f"{goal_emoji(goal.name)} {goal.name}: "
+                f"{goal_emoji(goal.name)} {escape_markdown(goal.name)}: "
                 f"{format_rubles(progress.get(goal.id, 0))} / "
                 f"{format_rubles(goal.target)} ₽ "
                 f"({percent}%)"
@@ -204,7 +212,7 @@ async def build_solo_stats_text(
     )
     if last:
         lines.append("")
-        lines.append("Последние операции:")
+        lines.append("*Последние операции:*")
         lines.extend(format_transaction_line(item, today) for item in last)
 
         lines.append("")
@@ -268,7 +276,7 @@ async def build_family_stats_text(
     partner_id = others[0].telegram_id if others else None
     partner_name = names.get(partner_id) if partner_id is not None else None
 
-    lines = [f"Семья: {family.name}"]  # type: ignore[attr-defined]
+    lines = [f"*Семья:* {escape_markdown(family.name)}"]  # type: ignore[attr-defined]
 
     own_card = await accounts_repo.get_balance(session, own_id, "card")
     own_savings = await accounts_repo.get_balance(session, own_id, "savings")
@@ -284,20 +292,21 @@ async def build_family_stats_text(
     )
 
     lines.append("")
-    lines.append("Счета:")
+    lines.append("*Счета:*")
     lines.append("")
     lines.append(f"Моя карта: {format_amount(own_card)}")
     if partner_id is not None:
+        owner_label = escape_markdown(
+            account_owner_label(partner_id, own_id, partner_name)
+        )
         lines.append(
-            f"Карта {account_owner_label(partner_id, own_id, partner_name)}"
-            f": {format_amount(partner_card)}"
+            f"Карта {owner_label}: {format_amount(partner_card)}"
         )
     lines.append("")
     lines.append(f"Моя копилка: {format_amount(own_savings)}")
     if partner_id is not None:
         lines.append(
-            f"Копилка {account_owner_label(partner_id, own_id, partner_name)}"
-            f": {format_amount(partner_savings)}"
+            f"Копилка {owner_label}: {format_amount(partner_savings)}"
         )
     lines.append("")
     lines.append(f"Свободно (карты): {format_amount(own_card + partner_card)}")
@@ -309,11 +318,11 @@ async def build_family_stats_text(
     )
     if goals:
         lines.append("")
-        lines.append("Цели:")
+        lines.append("*Цели:*")
         for goal in goals:
             percent = goal_progress_percent(progress.get(goal.id, 0), goal.target)
             lines.append(
-                f"{goal_emoji(goal.name)} {goal.name}: "
+                f"{goal_emoji(goal.name)} {escape_markdown(goal.name)}: "
                 f"{format_rubles(progress.get(goal.id, 0))} / "
                 f"{format_rubles(goal.target)} ₽ ({percent}%)"
             )
@@ -328,7 +337,7 @@ async def build_family_stats_text(
     if payments:
         payments.sort(key=lambda item: item[0])
         lines.append("")
-        lines.append("Ближайшие платежи:")
+        lines.append("*Ближайшие платежи:*")
         lines.extend(
             format_payment_line(payment_date, debt)
             for payment_date, debt in payments
@@ -339,7 +348,7 @@ async def build_family_stats_text(
     )
     if last:
         lines.append("")
-        lines.append("Последние операции:")
+        lines.append("*Последние операции:*")
         lines.extend(
             format_family_transaction_line(
                 item, today, own_id, names.get(item.telegram_id)
@@ -393,7 +402,7 @@ def format_family_transaction_line(
     else:
         sign = "+" if transaction.amount >= 0 else "−"
         signed = f"{sign}{format_amount(abs(transaction.amount))}"
-    author = member_label(transaction.telegram_id, own_id, name)
+    author = escape_markdown(member_label(transaction.telegram_id, own_id, name))
     return (
         f"{signed} ({author}, {format_date_label(transaction.created_at, today)})"
     )
@@ -409,7 +418,9 @@ async def cmd_stats(message: Message, session: AsyncSession) -> None:
         await message.answer("Сначала пройди онбординг: /start")
         return
 
-    await message.answer(await build_stats_text(session, user))
+    await message.answer(
+        await build_stats_text(session, user), parse_mode="Markdown"
+    )
 
 
 def build_router() -> Router:

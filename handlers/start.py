@@ -23,7 +23,9 @@ async def cmd_start(
     user = await users_repo.get_or_create(session, message.from_user.id)
     if user.onboarding_completed:
         await message.answer("С возвращением!")
-        await message.answer(await build_stats_text(session, user))
+        await message.answer(
+            await build_stats_text(session, user), parse_mode="Markdown"
+        )
         return
 
     await onboarding.show_intro(message, state)

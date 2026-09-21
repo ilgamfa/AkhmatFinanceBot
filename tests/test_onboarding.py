@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from services import users_repo
+from services import accounts_repo, users_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -118,7 +118,7 @@ async def test_full_profile_saved(
     user = await users_repo.get_by_telegram_id(session, 1)  # type: ignore[arg-type]
     assert user is not None
     assert user.onboarding_completed is True
-    assert user.free_money == 50000
+    assert await accounts_repo.get_balance(session, 1, "card") == 50000  # type: ignore[arg-type]
     assert user.income_type == "fixed"
     assert user.income_dates is not None
     assert "30000" in user.income_dates and "20000" in user.income_dates

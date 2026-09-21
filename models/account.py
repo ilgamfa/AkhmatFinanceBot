@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Integer, String
+from sqlalchemy import BigInteger, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from models.base import Base
@@ -20,12 +20,19 @@ class Account(Base):
     """
 
     __tablename__ = "accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_id", "type", name="uq_accounts_telegram_id_type"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
     family_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     # "card" — свободные деньги, "savings" — копилка.
     type: Mapped[str] = mapped_column(String(16))
+    # Название счёта: «Т-Банк», «Копилка».
+    name: Mapped[str] = mapped_column(String(64))
     balance: Mapped[int] = mapped_column(Integer, default=0)
     # ISO-дата (UTC)
     created_at: Mapped[str] = mapped_column(String(40))

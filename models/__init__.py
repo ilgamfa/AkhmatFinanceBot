@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+from models.account import ACCOUNT_TYPES, CARD, SAVINGS, Account
 from models.allocations import Allocation
-from models.account import CARD, SAVINGS, ACCOUNT_TYPES, Account
 from models.base import (
     AdviceStyle,
     Base,

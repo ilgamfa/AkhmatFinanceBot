@@ -9,10 +9,10 @@ from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from services import (
+    accounts_repo,
     allocations_repo,
     debts_repo,
     goals_repo,
-    savings_repo,
     users_repo,
 )
 
@@ -273,17 +273,17 @@ async def test_stats_full_format(
 
     text = (await send_message("/stats"))[0]
     blocks = text.split("\n\n")
-    assert "Свободно: 107 800 ₽" in text
-    assert "Доход:\n10 числа — 50 000 ₽" in text
-    assert "Ближайшие платежи:\n" in text
+    assert "*Свободно:* 107 800 ₽" in text
+    assert "*Доход:*\n10 числа — 50 000 ₽" in text
+    assert "*Ближайшие платежи:*\n" in text
     assert "— Кредит: 46 000 ₽" in text
     assert "Свободно до ЗП:" in text
     assert "Свободно до конца месяца:" in text
-    assert "Последние операции:" in text
+    assert "*Последние операции:*" in text
     assert "−4 200 ₽ (сегодня)" in text
     assert "+100 000 ₽ (сегодня)" in text
-    assert "За сегодня: +95 800 ₽" in text
-    assert blocks[-1].startswith("За сегодня:")
+    assert "*За сегодня:* +95 800 ₽" in text
+    assert blocks[-1].startswith("*За сегодня:*")
 
 
 async def test_stats_irregular_hides_until_salary(
@@ -299,7 +299,7 @@ async def test_stats_irregular_hides_until_salary(
     text = (await send_message("/stats"))[0]
     assert "Свободно до ЗП:" not in text
     assert "Свободно до конца месяца:" in text
-    assert "Доход: нерегулярный" in text
+    assert "*Доход:* нерегулярный" in text
     assert "Среднее в месяц: 90 000 ₽" in text
 
 
@@ -343,7 +343,8 @@ async def test_refresh_yes_deletes_goals_savings_and_allocations(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await savings_repo.add_to_savings(session, 1, 50000)
+    savings = await accounts_repo.ensure_account(session, 1, "savings")
+    await accounts_repo.correct_balance(session, savings.id, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
     await allocations_repo.allocate(session, goal.id, 40000)
     goal_id = goal.id
@@ -354,7 +355,7 @@ async def test_refresh_yes_deletes_goals_savings_and_allocations(
     session.expire_all()
     assert await goals_repo.get_goals(session, 1) == []
     assert await allocations_repo.get_allocations_by_goal(session, goal_id) == []
-    assert await savings_repo.get_savings(session, 1) == 0
+    assert await accounts_repo.get_balance(session, 1, "savings") == 0
 
 
 # --- 4.6 редактирование долгов ------------------------------------------------

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models import Account
 from services import accounts_repo, family_repo
 
 
@@ -17,6 +19,41 @@ async def test_create_accounts_makes_card_and_savings(session: AsyncSession) -> 
     savings = await accounts_repo.get_account(session, 1, "savings")
     assert card is not None and card.balance == 50000
     assert savings is not None and savings.balance == 0
+
+
+async def test_create_accounts_sets_default_names(session: AsyncSession) -> None:
+    """У карты и копилки непустые имена, по умолчанию «Карта» и «Копилка»."""
+    await accounts_repo.create_accounts(session, 1, card_balance=50000)
+
+    card = await accounts_repo.get_account(session, 1, "card")
+    savings = await accounts_repo.get_account(session, 1, "savings")
+    assert card is not None and card.name == "Карта"
+    assert savings is not None and savings.name == "Копилка"
+
+
+async def test_create_accounts_uses_card_name(session: AsyncSession) -> None:
+    """Название карты берётся из параметра, копилка остаётся «Копилка»."""
+    accounts = await accounts_repo.create_accounts(
+        session, 1, card_balance=50000, card_name="Т-Банк"
+    )
+    names = {account.type: account.name for account in accounts}
+    assert names == {"card": "Т-Банк", "savings": "Копилка"}
+
+
+async def test_duplicate_account_type_raises(session: AsyncSession) -> None:
+    """UNIQUE(telegram_id, type) не даёт завести вторую карту."""
+    await accounts_repo.create_accounts(session, 1, card_balance=1000)
+    session.add(
+        Account(
+            telegram_id=1,
+            type="card",
+            name="Дубль",
+            balance=0,
+            created_at="2026-09-21T00:00:00+00:00",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        await session.commit()
 
 
 async def test_create_accounts_is_idempotent(session: AsyncSession) -> None:
