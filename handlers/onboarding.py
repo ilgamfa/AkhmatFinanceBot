@@ -261,6 +261,7 @@ async def _finish(
 
     income_dates = dump_income_dates(entries) if entries else None
     card_balance = int(data.get("free_money") or 0)
+    family_id = data.get("family_id")
     await users_repo.save_onboarding_profile(
         session,
         user,
@@ -269,7 +270,10 @@ async def _finish(
         income=irregular_income,
     )
     await accounts_repo.create_accounts(
-        session, message.from_user.id, card_balance=card_balance
+        session,
+        message.from_user.id,
+        family_id=family_id,
+        card_balance=card_balance,
     )
     await state.clear()
     await message.answer(FINISH_TEXT)

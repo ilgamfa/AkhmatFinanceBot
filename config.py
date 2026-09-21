@@ -24,5 +24,10 @@ def _require_env(name: str) -> str:
 
 BOT_TOKEN: str = _require_env("BOT_TOKEN")
 
+# Username бота без «@» — для диплинков вида t.me/<username>?start=...
+BOT_USERNAME: str = os.getenv("BOT_USERNAME", "akhmatfinancebot").strip() or (
+    "akhmatfinancebot"
+)
+
 # Путь к файлу базы данных SQLite. Можно переопределить через .env.
 DB_PATH: str = os.getenv("DB_PATH", "finance.db").strip() or "finance.db"

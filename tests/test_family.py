@@ -104,3 +104,30 @@ async def test_get_partner_id(session: AsyncSession) -> None:
     await family_repo.join_family(session, 2, family.invite_code)
     assert await family_repo.get_partner_id(session, 1) == 2
     assert await family_repo.get_partner_id(session, 2) == 1
+
+
+# --- 5.1 get_family_by_code / rename / лимит участников -----------------------
+
+
+async def test_get_family_by_code_is_case_insensitive(session: AsyncSession) -> None:
+    family = await family_repo.create_family(session, 1)
+
+    found = await family_repo.get_family_by_code(session, family.invite_code.lower())
+    assert found is not None and found.id == family.id
+    assert await family_repo.get_family_by_code(session, "QQQQQQ") is None
+
+
+async def test_rename_family(session: AsyncSession) -> None:
+    family = await family_repo.create_family(session, 1, "Наша семья")
+
+    renamed = await family_repo.rename_family(session, family.id, "Ивановы")
+    assert renamed is not None and renamed.name == "Ивановы"
+    assert await family_repo.rename_family(session, 999, "Нет") is None
+
+
+async def test_join_family_third_member_raises(session: AsyncSession) -> None:
+    family = await family_repo.create_family(session, 1)
+    await family_repo.join_family(session, 2, family.invite_code)
+
+    with pytest.raises(ValueError):
+        await family_repo.join_family(session, 3, family.invite_code)
