@@ -144,3 +144,25 @@ async def test_family_id_set_on_own_accounts(session: AsyncSession) -> None:
 
     accounts = await accounts_repo.get_accounts(session, 1)
     assert all(account.family_id == family.id for account in accounts)
+
+
+def test_normalize_card_name() -> None:
+    """Пустое имя → «Карта», длинное — обрезается до 64 символов."""
+    assert accounts_repo.normalize_card_name(None) == "Карта"
+    assert accounts_repo.normalize_card_name("   ") == "Карта"
+    assert accounts_repo.normalize_card_name("  Т-Банк ") == "Т-Банк"
+    assert len(accounts_repo.normalize_card_name("x" * 100)) == 64
+
+
+async def test_rename_account(session: AsyncSession) -> None:
+    await accounts_repo.create_accounts(session, 1, card_balance=5000)
+    renamed = await accounts_repo.rename_account(session, 1, "card", "Т-Банк")
+    assert renamed is not None and renamed.name == "Т-Банк"
+
+    card = await accounts_repo.get_account(session, 1, "card")
+    assert card is not None and card.name == "Т-Банк"
+
+
+async def test_rename_account_missing(session: AsyncSession) -> None:
+    assert await accounts_repo.rename_account(session, 1, "card", "Сбер") is None
+

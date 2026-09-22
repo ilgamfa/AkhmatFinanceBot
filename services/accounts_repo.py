@@ -12,11 +12,23 @@ from models.account import CARD, SAVINGS
 
 DEFAULT_CARD_NAME = "Карта"
 DEFAULT_SAVINGS_NAME = "Копилка"
+# Длина поля accounts.name (String(64)).
+CARD_NAME_MAX = 64
 
 
 def _now_iso() -> str:
     """Текущее время в ISO-формате (UTC)."""
     return datetime.now(UTC).isoformat()
+
+
+def normalize_card_name(raw: str | None) -> str:
+    """Приводит имя карты к безопасному виду.
+
+    Обрезает пробелы и длину до ``CARD_NAME_MAX``. Пустой ввод заменяется
+    на «Карта».
+    """
+    name = (raw or "").strip()
+    return name[:CARD_NAME_MAX] if name else DEFAULT_CARD_NAME
 
 
 async def create_accounts(
@@ -140,6 +152,22 @@ async def correct_balance(
     await session.commit()
     await session.refresh(account)
     return account.balance
+
+
+async def rename_account(
+    session: AsyncSession,
+    telegram_id: int,
+    account_type: str,
+    new_name: str,
+) -> Account | None:
+    """Переименовывает счёт пользователя. None, если счёта нет."""
+    account = await get_account(session, telegram_id, account_type)
+    if account is None:
+        return None
+    account.name = new_name
+    await session.commit()
+    await session.refresh(account)
+    return account
 
 
 async def set_family_id(

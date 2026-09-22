@@ -1,4 +1,3 @@
-```markdown
 # AGENTS.md
 
 ## Контекст проекта
@@ -85,7 +84,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 **`debts`** — `id`, `telegram_id` (BigInteger, index), `name` (String(64)), `type` (String(16), `loan`/`mortgage`/`credit_card`/`installment`), `amount` (Integer), `payment_day` (Integer, 1–31), `created_at` (String(40), ISO).
 
-**`accounts`** — `id`, `telegram_id` (BigInteger, index), `family_id` (Integer, index, nullable), `type` (String(16), `card`/`savings`), **`name` (String(64), NOT NULL)** — добавляется в Фазе 5.1, `balance` (Integer, default 0), `created_at` (String(40), ISO).
+**`accounts`** — `id`, `telegram_id` (BigInteger, index), `family_id` (Integer, index, nullable), `type` (String(16), `card`/`savings`), **`name` (String(64), NOT NULL)** — обязательно, спрашивается в онбординге, `balance` (Integer, default 0), `created_at` (String(40), ISO).
 **UNIQUE-ограничение:** `(telegram_id, type)` — одна карта и одна копилка на пользователя.
 
 **`goals`** — `id`, `telegram_id` (BigInteger, index), `family_id` (Integer, index, nullable), `name` (String(64)), `target` (Integer), `deadline` (String(10), ISO, nullable), `priority` (Integer, 1–3), `created_at` (String(40), ISO).
@@ -98,7 +97,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 ### Репозитории
 
-- `services/accounts_repo.py` — `create_accounts`, `get_balance`, `get_account`, `get_accounts`, `get_family_accounts`, `update_balance`, `correct_balance`.
+- `services/accounts_repo.py` — `create_accounts`, `get_balance`, `get_account`, `get_accounts`, `get_family_accounts`, `update_balance`, `correct_balance`, `rename_account`.
 - `services/transactions_repo.py` — операции с транзакциями.
 - `services/debts_repo.py` — операции с долгами.
 - `services/goals_repo.py` — операции с целями.
@@ -131,11 +130,13 @@ python -m py_compile bot.py     # проверка синтаксиса
 - `PRD.md` — что строим (продукт, команды, модель данных, фазы). Только актуальное состояние и активные задачи.
 - `AGENTS.md` — как строим (стек, правила, схема БД, репозитории). Только актуальные правила.
 - `CHANGELOG.md` — история выполненного.
+- `TODO.md` — активные задачи.
 
-После завершения фазы или пункта:
-1. Обновить `CHANGELOG.md` — добавить выполненное.
-2. Убрать выполненное из `PRD.md` и `AGENTS.md`.
-3. Если изменилась схема БД или правила — обновить `AGENTS.md`.
+После завершения пункта или фазы:
+1. Отметить пункт в TODO.md как выполненный или удалить его.
+2. Добавить выполненное в CHANGELOG.md.
+3. Убрать выполненное из PRD.md и AGENTS.md.
+4. Если изменилась схема БД или правила — обновить AGENTS.md.
 
 ## Фазы разработки
 
@@ -149,9 +150,8 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 ### Фаза 5.1 — Фиксы (в работе)
 
-1. Название карты при онбординге (обязательно, `accounts.name NOT NULL`).
-2. Улучшение создания семьи (кнопки при `/start`).
-3. «Хватает / не хватает» в `/stats`.
+1. Улучшение создания семьи (кнопки при `/start`).
+2. «Хватает / не хватает» в `/stats`.
 
 ### Что НЕ делать в Фазе 5.1
 

@@ -8,6 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -31,6 +32,7 @@ INTRO_TEXT = (
 )
 
 MONEY_TEXT = "Сколько у тебя сейчас на картах и наличных? Напиши примерную сумму."
+CARD_NAME_TEXT = "Как назовём твою карту? Например: Т-Банк, Сбер, Зарплатная"
 INCOME_KIND_TEXT = "Как у тебя устроен доход?"
 TIMES_TEXT = "Сколько раз в месяц приходят деньги?"
 FIXED_FIRST_TEXT = "Напиши первую дату и сумму. Например: 10, 30000"
@@ -104,6 +106,7 @@ class Onboarding(StatesGroup):
     """Шаги онбординга."""
 
     money_now = State()
+    card_name = State()
     income_kind = State()
     times_per_month = State()
     fixed_first = State()
@@ -149,6 +152,19 @@ async def process_money_now(message: Message, state: FSMContext) -> None:
         await message.answer(f"{exc}\nПопробуй ещё раз.")
         return
     await state.update_data(free_money=amount)
+    await state.set_state(Onboarding.card_name)
+    await message.answer(
+        CARD_NAME_TEXT,
+        reply_markup=ForceReply(
+            input_field_placeholder=CARD_NAME_TEXT, selective=True
+        ),
+    )
+
+
+async def process_card_name(message: Message, state: FSMContext) -> None:
+    """Шаг 3: название карты (пусто → «Карта»)."""
+    card_name = accounts_repo.normalize_card_name(message.text)
+    await state.update_data(card_name=card_name)
     await state.set_state(Onboarding.income_kind)
     await message.answer(INCOME_KIND_TEXT, reply_markup=_income_kind_keyboard())
 
@@ -261,6 +277,7 @@ async def _finish(
 
     income_dates = dump_income_dates(entries) if entries else None
     card_balance = int(data.get("free_money") or 0)
+    card_name = data.get("card_name")
     family_id = data.get("family_id")
     await users_repo.save_onboarding_profile(
         session,
@@ -274,6 +291,7 @@ async def _finish(
         message.from_user.id,
         family_id=family_id,
         card_balance=card_balance,
+        card_name=card_name or accounts_repo.DEFAULT_CARD_NAME,
     )
     await state.clear()
     await message.answer(FINISH_TEXT)
@@ -329,6 +347,7 @@ def build_router() -> Router:
     router.callback_query.register(on_refresh_no, F.data == "refresh:no")
 
     router.message.register(process_money_now, Onboarding.money_now)
+    router.message.register(process_card_name, Onboarding.card_name)
     router.message.register(process_fixed_first, Onboarding.fixed_first)
     router.message.register(process_fixed_second, Onboarding.fixed_second)
     router.message.register(process_irregular_amount, Onboarding.irregular_amount)

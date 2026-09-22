@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
+from aiogram.types import ForceReply
+
 from services import accounts_repo, users_repo
 
 Send = Callable[..., Awaitable[list[str]]]
@@ -24,6 +26,19 @@ async def test_later_skips_onboarding(
     assert "вернёшься" in replies[0]
 
 
+async def test_onboarding_asks_card_name(
+    send_message: Send, send_callback: Press, bot: object
+) -> None:
+    """После суммы бот спрашивает название карты через ForceReply."""
+    await send_message("/start")
+    await send_callback("onboarding:start")
+    replies = await send_message("50000")
+    assert "Как назовём" in replies[0]
+    assert isinstance(
+        bot.session.last_reply_markup, ForceReply  # type: ignore[attr-defined]
+    )
+
+
 async def test_fixed_single_income(
     send_message: Send, send_callback: Press, session: object
 ) -> None:
@@ -31,7 +46,10 @@ async def test_fixed_single_income(
     started = await send_callback("onboarding:start")
     assert "на картах" in started[0]
 
-    ask_kind = await send_message("50000")
+    ask_name = await send_message("50000")
+    assert "Как назовём" in ask_name[0]
+
+    ask_kind = await send_message("Т-Банк")
     assert "устроен доход" in ask_kind[0]
 
     ask_times = await send_callback("onboarding:income_fixed")
@@ -51,6 +69,7 @@ async def test_fixed_double_income(
     await send_message("/start")
     await send_callback("onboarding:start")
     await send_message("10000")
+    await send_message("Зарплатная")
     await send_callback("onboarding:income_fixed")
     asked_first = await send_callback("onboarding:times_2")
     assert "первую дату" in asked_first[0]
@@ -68,6 +87,9 @@ async def test_irregular_income(
     await send_message("/start")
     await send_callback("onboarding:start")
     await send_message("5000")
+    ask_kind = await send_message("Сбер")
+    assert "устроен доход" in ask_kind[0]
+
     asked = await send_callback("onboarding:income_irregular")
     assert "в среднем" in asked[0]
 
@@ -90,6 +112,7 @@ async def test_invalid_date_amount_rejected(
     await send_message("/start")
     await send_callback("onboarding:start")
     await send_message("1000")
+    await send_message("Карта")
     await send_callback("onboarding:income_fixed")
     await send_callback("onboarding:times_1")
     replies = await send_message("99, 1000")
@@ -110,6 +133,7 @@ async def test_full_profile_saved(
     await send_message("/start")
     await send_callback("onboarding:start")
     await send_message("50000")
+    await send_message("Т-Банк")
     await send_callback("onboarding:income_fixed")
     await send_callback("onboarding:times_2")
     await send_message("10, 30000")
@@ -119,9 +143,27 @@ async def test_full_profile_saved(
     assert user is not None
     assert user.onboarding_completed is True
     assert await accounts_repo.get_balance(session, 1, "card") == 50000  # type: ignore[arg-type]
+    card = await accounts_repo.get_account(session, 1, "card")  # type: ignore[arg-type]
+    assert card is not None and card.name == "Т-Банк"
     assert user.income_type == "fixed"
     assert user.income_dates is not None
     assert "30000" in user.income_dates and "20000" in user.income_dates
+
+
+async def test_empty_card_name_defaults_to_karta(
+    send_message: Send, send_callback: Press, session: object
+) -> None:
+    """Пустой ответ на шаге названия карты → «Карта»."""
+    await send_message("/start")
+    await send_callback("onboarding:start")
+    await send_message("7000")
+    await send_message("")
+    await send_callback("onboarding:income_fixed")
+    await send_callback("onboarding:times_1")
+    await send_message("10, 7000")
+
+    card = await accounts_repo.get_account(session, 1, "card")  # type: ignore[arg-type]
+    assert card is not None and card.name == "Карта"
 
 
 async def test_irregular_profile_saved(
@@ -130,6 +172,7 @@ async def test_irregular_profile_saved(
     await send_message("/start")
     await send_callback("onboarding:start")
     await send_message("5000")
+    await send_message("Зарплатная")
     await send_callback("onboarding:income_irregular")
     await send_message("70000")
 

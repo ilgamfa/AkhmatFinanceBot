@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 
 from config import BOT_TOKEN, DB_PATH
 from handlers import (
+    accounts,
     allocate,
     debts,
     family,
@@ -38,6 +39,7 @@ def create_dispatcher(database: Database) -> Dispatcher:
         savings.build_router(),
         allocate.build_router(),
         family.build_router(),
+        accounts.build_router(),
         forecast.build_router(),
         stats.build_router(),
         onboarding.build_router(),
