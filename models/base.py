@@ -27,6 +27,13 @@ class TransactionType(StrEnum):
     SAVINGS_ADD = "savings_add"
 
 
+class CategoryType(StrEnum):
+    """Тип категории (Фаза 6)."""
+
+    EXPENSE = "expense"
+    INCOME = "income"
+
+
 class IncomeType(StrEnum):
     """Формат дохода: фиксированный или нерегулярный."""
 

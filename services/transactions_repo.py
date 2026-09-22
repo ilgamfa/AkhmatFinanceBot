@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Transaction
@@ -24,11 +24,13 @@ async def add_transaction(
     transaction_type: str,
     amount: int,
     account_id: int | None = None,
+    category_id: int | None = None,
 ) -> Transaction:
     """Записывает операцию и возвращает её."""
     transaction = Transaction(
         telegram_id=telegram_id,
         account_id=account_id,
+        category_id=category_id,
         type=transaction_type,
         amount=amount,
         created_at=_now_iso(),
@@ -37,6 +39,18 @@ async def add_transaction(
     await session.commit()
     await session.refresh(transaction)
     return transaction
+
+
+async def set_category(
+    session: AsyncSession, transaction_id: int, category_id: int | None
+) -> None:
+    """Проставляет категорию уже записанной операции."""
+    await session.execute(
+        update(Transaction)
+        .where(Transaction.id == transaction_id)
+        .values(category_id=category_id)
+    )
+    await session.commit()
 
 
 async def get_last_transactions(
