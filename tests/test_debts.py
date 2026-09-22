@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import UTC, date, datetime
 
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +51,11 @@ async def _add_debt(
     await send_callback(f"debt_type:{debt_type}")
     await send_message(amount)
     await send_message(day)
+
+
+def _today_day() -> str:
+    """День платежа, который гарантированно входит в текущий месяц."""
+    return str(datetime.now(UTC).date().day)
 
 
 # --- 3.1 репозиторий ---------------------------------------------------------
@@ -234,11 +239,12 @@ async def test_stats_shows_upcoming_payments(
     send_message: Send, send_callback: Press
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    await _add_debt(send_message, send_callback, "Кредит", "46000", _today_day())
 
     text = (await send_message("/stats"))[0]
-    assert "Ближайшие платежи:" in text
+    assert "*Платежи до конца месяца:*" in text
     assert "— Кредит: 46 000 ₽" in text
+    assert "Свободно: 12 000 ₽ — не хватает ❌ (нужно ещё 34 000 ₽)" in text
 
 
 async def test_stats_no_debts_hides_payments(
@@ -246,7 +252,7 @@ async def test_stats_no_debts_hides_payments(
 ) -> None:
     await _onboard(send_message, send_callback)
     text = (await send_message("/stats"))[0]
-    assert "Ближайшие платежи:" not in text
+    assert "*Платежи до конца месяца:*" not in text
     assert "Свободно до ЗП:" not in text
     assert "Свободно до конца месяца:" not in text
 
@@ -267,7 +273,7 @@ async def test_stats_full_format(
 ) -> None:
     """Полный формат /stats: доход, платежи, свободно до, операции, сальдо."""
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    await _add_debt(send_message, send_callback, "Кредит", "46000", _today_day())
     await send_message("/plus 100000")
     await send_message("/minus 4200")
 
@@ -275,8 +281,9 @@ async def test_stats_full_format(
     blocks = text.split("\n\n")
     assert "*Свободно:* 107 800 ₽" in text
     assert "*Доход:*\n10 числа — 50 000 ₽" in text
-    assert "*Ближайшие платежи:*\n" in text
+    assert "*Платежи до конца месяца:*" in text
     assert "— Кредит: 46 000 ₽" in text
+    assert "Свободно: 107 800 ₽ — хватает ✅" in text
     assert "Свободно до ЗП:" in text
     assert "Свободно до конца месяца:" in text
     assert "*Последние операции:*" in text

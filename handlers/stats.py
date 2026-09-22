@@ -15,13 +15,14 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Family, FamilyMember, Transaction, User
+from models import Debt, Family, FamilyMember, Transaction, User
 from models.base import IncomeType, TransactionType
 from services import (
     accounts_repo,
     debts_repo,
     family_repo,
     goals_repo,
+    stats_service,
     transactions_repo,
     users_repo,
 )
@@ -120,13 +121,98 @@ def _period_line(title: str, amount: int) -> str:
     return f"*{title}:* {format_amount(0)}"
 
 
-def format_payment_line(payment_date: date, debt: object) -> str:
-    """Строка ближайшего платежа: «25.09 — Кредит: 46 000 ₽»."""
+def format_balance(amount: int) -> str:
+    """Баланс со знаком: отрицательный — «−5 000 ₽» (U+2212)."""
+    if amount < 0:
+        return f"−{format_amount(abs(amount))}"
+    return format_amount(amount)
+
+
+_VOWELS = set("аеёиоуыэюя")
+
+
+def genitive_name(name: str) -> str:
+    """Имя в родительном падеже для «Свободно у …» (упрощённое правило)."""
+    if not name:
+        return name
+    lower = name[-1].lower()
+    if lower == "а":
+        return name[:-1] + ("Ы" if name[-1].isupper() else "ы")
+    if lower == "я":
+        return name[:-1] + ("И" if name[-1].isupper() else "и")
+    if lower in ("й", "ь"):
+        return name[:-1] + ("Я" if name[-1].isupper() else "я")
+    if lower in _VOWELS:
+        return name
+    return name + "а"
+
+
+def format_month_payment_line(
+    payment_date: date, debt: Debt, owner_name: str | None = None
+) -> str:
+    """Строка платежа: «25.09 — Кредит (Ильгам): 46 000 ₽»."""
+    owner = f" ({escape_markdown(owner_name)})" if owner_name else ""
     return (
         f"{payment_date.strftime('%d.%m')} — "
-        f"{escape_markdown(debt.name)}: "  # type: ignore[attr-defined]
-        f"{format_amount(debt.amount)}"  # type: ignore[attr-defined]
+        f"{escape_markdown(debt.name)}{owner}: {format_amount(debt.amount)}"
     )
+
+
+def format_verdict_line(
+    free: int, shortfall: int, owner_name: str | None = None
+) -> str:
+    """Строка вердикта: «Свободно у Ильгама: 50 000 ₽ — хватает ✅»."""
+    who = f" у {escape_markdown(genitive_name(owner_name))}" if owner_name else ""
+    if shortfall <= 0:
+        return f"  Свободно{who}: {format_balance(free)} — хватает ✅"
+    return (
+        f"  Свободно{who}: {format_balance(free)} — "
+        f"не хватает ❌ (нужно ещё {format_amount(shortfall)})"
+    )
+
+
+def render_month_payments(
+    groups: list[list[stats_service.PaymentVerdict]],
+    header: str,
+    *,
+    show_owner: bool,
+) -> list[str]:
+    """Строки блока платежей: заголовок и группы дней через пустую строку."""
+    lines = [header]
+    for group in groups:
+        lines.append("")
+        for verdict in group:
+            owner = verdict.owner_name if show_owner else None
+            lines.append(
+                format_month_payment_line(
+                    verdict.payment_date, verdict.debt, owner
+                )
+            )
+            lines.append(
+                format_verdict_line(verdict.free, verdict.shortfall, owner)
+            )
+    return lines
+
+
+async def _month_payment_groups(
+    session: AsyncSession,
+    owners: list[tuple[int, str]],
+    today: date,
+) -> list[list[stats_service.PaymentVerdict]]:
+    """Вердикты по платежам владельцев до конца текущего месяца."""
+    days = (end_of_month(today) - today).days
+    balances: dict[int, int] = {}
+    payments: list[tuple[date, Debt, int, str]] = []
+    for owner_id, owner_name in owners:
+        balances[owner_id] = await accounts_repo.get_balance(
+            session, owner_id, "card"
+        )
+        for payment_date, debt in await debts_repo.get_upcoming_payments(
+            session, owner_id, days, today
+        ):
+            payments.append((payment_date, debt, owner_id, owner_name))
+    payments.sort(key=lambda item: item[0])
+    return stats_service.build_payment_verdicts(payments, balances)
 
 
 def format_family_transaction_line(
@@ -174,15 +260,15 @@ async def build_solo_stats_text(
         lines.append("")
         lines.extend(income_lines)
 
-    upcoming = await debts_repo.get_upcoming_payments(
-        session, user.telegram_id, UPCOMING_DAYS, today
+    groups = await _month_payment_groups(
+        session, [(user.telegram_id, "")], today
     )
-    if upcoming:
+    if groups:
         lines.append("")
-        lines.append("*Ближайшие платежи:*")
         lines.extend(
-            format_payment_line(payment_date, debt)
-            for payment_date, debt in upcoming
+            render_month_payments(
+                groups, "*Платежи до конца месяца:*", show_owner=False
+            )
         )
 
     debts = await debts_repo.get_debts(session, user.telegram_id)
@@ -320,20 +406,14 @@ async def build_family_stats_text(
         )
     lines.append(f"Итого: {format_amount(total_free)}")
 
-    payments: list[tuple[date, object]] = []
-    for member in members:
-        payments.extend(
-            await debts_repo.get_upcoming_payments(
-                session, member.telegram_id, UPCOMING_DAYS, today
-            )
-        )
-    if payments:
-        payments.sort(key=lambda item: item[0])
+    owners = [(member.telegram_id, member_name(member)) for member in members]
+    groups = await _month_payment_groups(session, owners, today)
+    if groups:
         lines.append("")
-        lines.append("*Ближайшие платежи:*")
         lines.extend(
-            format_payment_line(payment_date, debt)
-            for payment_date, debt in payments
+            render_month_payments(
+                groups, "*Платежи до конца месяца:*", show_owner=True
+            )
         )
 
     goals = await goals_repo.get_goals(session, user.telegram_id)
@@ -397,15 +477,11 @@ async def build_member_stats_text(
         f"*Свободно:* {format_amount(card)}",
     ]
 
-    payments = await debts_repo.get_upcoming_payments(
-        session, member_id, UPCOMING_DAYS, today
-    )
-    if payments:
+    groups = await _month_payment_groups(session, [(member_id, name)], today)
+    if groups:
         lines.append("")
-        lines.append("*Мои платежи:*")
         lines.extend(
-            format_payment_line(payment_date, debt)
-            for payment_date, debt in payments
+            render_month_payments(groups, "*Мои платежи:*", show_owner=False)
         )
 
     goals = await goals_repo.get_goals(session, member_id)
