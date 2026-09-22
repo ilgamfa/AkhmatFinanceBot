@@ -19,6 +19,7 @@ from models import Debt, Family, FamilyMember, Transaction, User
 from models.base import IncomeType, TransactionType
 from services import (
     accounts_repo,
+    categories_repo,
     debts_repo,
     family_repo,
     goals_repo,
@@ -126,6 +127,21 @@ def format_balance(amount: int) -> str:
     if amount < 0:
         return f"−{format_amount(abs(amount))}"
     return format_amount(amount)
+
+
+def month_start_iso(today: date) -> str:
+    """Начало календарного месяца в ISO-формате (UTC)."""
+    return datetime(today.year, today.month, 1, tzinfo=UTC).isoformat()
+
+
+def format_top_categories_lines(top: list[tuple[str, int]]) -> list[str]:
+    """Строки блока «Топ категорий за месяц». Пустой список — блок скрыт."""
+    if not top:
+        return []
+    lines = ["", "*Топ категорий за месяц:*"]
+    for index, (name, amount) in enumerate(top, start=1):
+        lines.append(f"{index}. {escape_markdown(name)}: {format_amount(amount)}")
+    return lines
 
 
 _VOWELS = set("аеёиоуыэюя")
@@ -359,6 +375,11 @@ async def build_solo_stats_text(
             )
         )
 
+    top = await categories_repo.get_top_expense_categories(
+        session, user.telegram_id, month_start_iso(today)
+    )
+    lines.extend(format_top_categories_lines(top))
+
     return "\n".join(lines)
 
 
@@ -454,6 +475,11 @@ async def build_family_stats_text(
             )
         )
 
+    top = await categories_repo.get_top_expense_categories(
+        session, user.telegram_id, month_start_iso(today)
+    )
+    lines.extend(format_top_categories_lines(top))
+
     return "\n".join(lines)
 
 
@@ -506,6 +532,11 @@ async def build_member_stats_text(
         lines.append("")
         lines.append("*Мои последние операции:*")
         lines.extend(format_transaction_line(item, today) for item in last)
+
+    top = await categories_repo.get_top_expense_categories(
+        session, member_id, month_start_iso(today)
+    )
+    lines.extend(format_top_categories_lines(top))
 
     return "\n".join(lines)
 

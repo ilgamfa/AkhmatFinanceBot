@@ -10,10 +10,12 @@ from models.allocations import Allocation
 from models.base import (
     AdviceStyle,
     Base,
+    CategoryType,
     DebtType,
     IncomeType,
     TransactionType,
 )
+from models.category import Category
 from models.debt import Debt
 from models.family import Family, FamilyMember
 from models.goal import Goal
@@ -28,6 +30,8 @@ __all__ = [
     "AdviceStyle",
     "Allocation",
     "Base",
+    "Category",
+    "CategoryType",
     "Debt",
     "DebtType",
     "Family",

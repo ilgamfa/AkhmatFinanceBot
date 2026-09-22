@@ -75,12 +75,12 @@ python -m py_compile bot.py     # проверка синтаксиса
 - Суммы хранятся целыми рублями (`INTEGER`).
 - `create_all` не меняет существующие таблицы — при смене полей удаляй dev-БД `finance.db`.
 
-### Актуальные таблицы (8)
+### Актуальные таблицы (9)
 
 **`users`** — `id`, `telegram_id` (BigInteger, unique, index), `advice_style` (String(16), default `"soft"`), `onboarding_completed` (Boolean, default `False`), `income_type` (String(16), nullable), `income_dates` (Text, JSON), `income` (Integer, nullable), `created_at` (DateTime tz).
 **Поля `free_money` нет** — баланс в `accounts.balance` для `type="card"`.
 
-**`transactions`** — `id`, `telegram_id` (BigInteger, index), `account_id` (Integer, index, nullable), `type` (String(16), `expense`/`income`/`correction`/`savings_add`), `amount` (Integer), `created_at` (String(40), ISO).
+**`transactions`** — `id`, `telegram_id` (BigInteger, index), `account_id` (Integer, index, nullable), `category_id` (Integer, nullable, index), `type` (String(16), `expense`/`income`/`correction`/`savings_add`), `amount` (Integer), `created_at` (String(40), ISO).
 
 **`debts`** — `id`, `telegram_id` (BigInteger, index), `name` (String(64)), `type` (String(16), `loan`/`mortgage`/`credit_card`/`installment`), `amount` (Integer), `payment_day` (Integer, 1–31), `created_at` (String(40), ISO).
 
@@ -95,6 +95,8 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 **`family_members`** — `id`, `family_id` (Integer, FK `families.id`, index), `telegram_id` (BigInteger, index, UniqueConstraint), `role` (String(16), `owner`/`member`), `first_name` (String(64), nullable).
 
+**`categories`** — `id`, `telegram_id` (BigInteger, index), `name` (String(64)), `type` (String(16), `expense`/`income`), `is_custom` (Boolean, default False), `created_at` (String(40), ISO).
+
 ### Репозитории
 
 - `services/accounts_repo.py` — `create_accounts`, `get_balance`, `get_account`, `get_accounts`, `get_family_accounts`, `update_balance`, `correct_balance`, `rename_account`.
@@ -103,6 +105,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 - `services/goals_repo.py` — операции с целями.
 - `services/allocations_repo.py` — `allocate`, `unallocate`, `get_allocations_by_goal`, `get_allocations_by_user`.
 - `services/family_repo.py` — `create_family`, `join_family`, `get_family`, `get_family_members`.
+- `services/categories_repo.py` — `get_categories`, `add_category`, `get_default_categories`.
 
 ## Логика расчётов
 
@@ -116,6 +119,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 - **Прогноз** (`/forecast`): свободно + доход до конца месяца − платежи долгов − «нужно в месяц» на цели.
 - **`/minus`** уменьшает баланс `card`, **`/plus`** увеличивает, **`/correct`** задаёт новое значение. Все пишут в `transactions`.
 - **`/savings add N`** списывает N из `card`, кладёт в `savings`, пишет `savings_add`.
+- **Категории** (Фаза 6): при `/minus` и `/plus` без категории — показать кнопки. При выборе — сохранить `category_id`. Кнопка `[➕ Своя]` — ForceReply + `add_category`. Кнопка `[❌ Без категории]` — сохранить без `category_id`. Топ-3 категорий за месяц в `/stats`.
 - **Счета создаёт онбординг.** При вступлении в семью счета заранее не создаются: счета нового участника создаёт онбординг сразу с балансом карты и `family_id`; уже прошедшему онбординг при вступлении проставляется `family_id` у существующих счетов.
 - Если покупка ломает план — предупредить, но не запрещать.
 
@@ -145,21 +149,10 @@ python -m py_compile bot.py     # проверка синтаксиса
 | Фаза | Название | Статус |
 |---|---|---|
 | 1–5 | Онбординг, операции, долги, копилка/цели, семья | ✅ (см. CHANGELOG.md) |
-| 5.1 | Фиксы Фазы 5 | 🔄 |
-| 6 | Категории | ⏳ |
+| 5.1 | Фиксы Фазы 5 | ✅ (см. CHANGELOG.md) |
+| 6 | Категории | ✅ (см. CHANGELOG.md) |
 | 7 | /can, советы, напоминания | ⏳ |
 | 8 | LLM-советник, экспорт | ⏳ |
-
-### Фаза 5.1 — Фиксы (в работе)
-
-1. Улучшение создания семьи (кнопки при `/start`).
-
-### Что НЕ делать в Фазе 5.1
-
-- Не переходить на HTML.
-- Не трогать логику расчётов.
-- Не менять порядок блоков в `/stats`.
-- Не добавлять фичи из Фаз 6–8.
 
 ## Что НЕ делать (глобально)
 
