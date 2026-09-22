@@ -205,7 +205,7 @@ async def test_deeplink_onboarding_balance_visible_in_stats(
     await send_message("10, 50000", user_id=2, first_name="Жена")
 
     text = (await send_message("/stats", user_id=2, first_name="Жена"))[0]
-    assert "Моя карта: 30 000 ₽" in text
+    assert "Карта (Жена): 30 000 ₽" in text
 
 
 async def test_deeplink_no_cancels(

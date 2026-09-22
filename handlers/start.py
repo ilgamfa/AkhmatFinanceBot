@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from handlers import onboarding
 from handlers.family import JOINED_TEXT as FAMILY_JOINED_TEXT
-from handlers.stats import build_stats_text
+from handlers.stats import build_stats_screen
 from services import accounts_repo, family_repo, users_repo
 
 DEEPLINK_PREFIX = "family_"
@@ -57,9 +57,8 @@ async def cmd_start(
     user = await users_repo.get_or_create(session, message.from_user.id)
     if user.onboarding_completed:
         await message.answer("С возвращением!")
-        await message.answer(
-            await build_stats_text(session, user), parse_mode="Markdown"
-        )
+        text, keyboard = await build_stats_screen(session, user)
+        await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         return
 
     await onboarding.show_intro(message, state)
@@ -132,9 +131,8 @@ async def on_family_link_yes(
         await accounts_repo.create_accounts(
             session, telegram_id, family_id=family.id
         )
-        await message.answer(
-            await build_stats_text(session, user), parse_mode="Markdown"
-        )
+        text, keyboard = await build_stats_screen(session, user)
+        await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
         return
 
     # Новому участнику счета создаст онбординг — сразу с балансом и family_id.

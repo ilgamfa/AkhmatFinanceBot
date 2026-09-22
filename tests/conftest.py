@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import pytest_asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
-from aiogram.methods import SendMessage
+from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, Update
 from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ class StubSession(BaseSession):
     def __init__(self) -> None:
         super().__init__()
         self.sent: list[SendMessage] = []
+        self.edited: list[EditMessageText] = []
         self.last_reply_markup: object | None = None
 
     async def make_request(self, bot: Bot, method, timeout=None):  # type: ignore[override]
@@ -37,6 +38,16 @@ class StubSession(BaseSession):
                 message_id=len(self.sent),
                 date=datetime.now(UTC),
                 chat=Chat(id=method.chat_id, type="private"),
+                text=method.text or "",
+            )
+            return message
+        if isinstance(method, EditMessageText):
+            self.edited.append(method)
+            self.last_reply_markup = method.reply_markup
+            message = Message(
+                message_id=method.message_id or 0,
+                date=datetime.now(UTC),
+                chat=Chat(id=method.chat_id or 0, type="private"),
                 text=method.text or "",
             )
             return message
