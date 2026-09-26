@@ -19,7 +19,7 @@ Telegram-бот «Карманный финсоветник» для плани�
 - Конфиг: python-dotenv (`.env`)
 - Parse mode: legacy Markdown (только там, где нужно)
 - Хостинг: VPS в РФ
-- LLM для советов: API (Фаза 8)
+- LLM для советов: API (Фаза 9)
 - Тесты: pytest + pytest-asyncio, БД для тестов — in-memory SQLite
 - Линтер: ruff
 
@@ -75,14 +75,16 @@ python -m py_compile bot.py     # проверка синтаксиса
 - Суммы хранятся целыми рублями (`INTEGER`).
 - `create_all` не меняет существующие таблицы — при смене полей удаляй dev-БД `finance.db`.
 
-### Актуальные таблицы (9)
+### Актуальные таблицы (10)
 
 **`users`** — `id`, `telegram_id` (BigInteger, unique, index), `advice_style` (String(16), default `"soft"`), `onboarding_completed` (Boolean, default `False`), `income_type` (String(16), nullable), `income_dates` (Text, JSON), `income` (Integer, nullable), `created_at` (DateTime tz).
 **Поля `free_money` нет** — баланс в `accounts.balance` для `type="card"`.
 
 **`transactions`** — `id`, `telegram_id` (BigInteger, index), `account_id` (Integer, index, nullable), `category_id` (Integer, nullable, index), `type` (String(16), `expense`/`income`/`correction`/`savings_add`), `amount` (Integer), `created_at` (String(40), ISO).
 
-**`debts`** — `id`, `telegram_id` (BigInteger, index), `name` (String(64)), `type` (String(16), `loan`/`mortgage`/`credit_card`/`installment`), `amount` (Integer), `payment_day` (Integer, 1–31), `created_at` (String(40), ISO).
+**`debts`** — `id`, `telegram_id` (BigInteger, index), `name` (String(64)), `type` (String(16), `regular`/`short`/`one`), `created_at` (String(40), ISO).
+
+**`debt_payments`** — `id`, `debt_id` (FK `debts.id`, index), `amount` (Integer), `due_date` (String(10), ISO), `status` (String(16), `pending`/`paid`), `paid_at` (String(40), ISO, nullable).
 
 **`accounts`** — `id`, `telegram_id` (BigInteger, index), `family_id` (Integer, index, nullable), `type` (String(16), `card`/`savings`), **`name` (String(64), NOT NULL)** — обязательно, спрашивается в онбординге, `balance` (Integer, default 0), `created_at` (String(40), ISO).
 **UNIQUE-ограничение:** `(telegram_id, type)` — одна карта и одна копилка на пользователя.
@@ -101,7 +103,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 - `services/accounts_repo.py` — `create_accounts`, `get_balance`, `get_account`, `get_accounts`, `get_family_accounts`, `update_balance`, `correct_balance`, `rename_account`.
 - `services/transactions_repo.py` — операции с транзакциями.
-- `services/debts_repo.py` — операции с долгами.
+- `services/debts_repo.py` — `create_debt`, `get_debts`, `get_debt`, `rename_debt`, `delete_debt`, `update_debt_schedule`, `add_payment`, `get_payments`, `get_payment`, `update_payment`, `mark_paid`, `get_pending_payments`, `get_paid_payments`.
 - `services/goals_repo.py` — операции с целями.
 - `services/allocations_repo.py` — `allocate`, `unallocate`, `get_allocations_by_goal`, `get_allocations_by_user`.
 - `services/family_repo.py` — `create_family`, `join_family`, `get_family`, `get_family_members`.
@@ -120,6 +122,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 - **`/minus`** уменьшает баланс `card`, **`/plus`** увеличивает, **`/correct`** задаёт новое значение. Все пишут в `transactions`.
 - **`/savings add N`** списывает N из `card`, кладёт в `savings`, пишет `savings_add`.
 - **Категории** (Фаза 6): при `/minus` и `/plus` без категории — показать кнопки. При выборе — сохранить `category_id`. Кнопка `[➕ Своя]` — ForceReply + `add_category`. Кнопка `[❌ Без категории]` — сохранить без `category_id`. Топ-3 категорий за месяц в `/stats`.
+- **Долги** (Фаза 7): единая схема `debts` + `debt_payments`, тип в `debts.type` (`regular`/`short`/`one`). Регулярный: число месяца, 12 платежей по умолчанию. Краткосрочный: N платежей (N ≥ 1). Разовый: 1 платёж. Список `/debts` — по типу: «46 000 ₽/мес, 25 числа», «3 платежа, следующий 05.10», «44 000 ₽, 07.10.2026». В /stats: «Предстоящие» — pending-платежи (регулярные/краткосрочные до конца месяца, разовые на любую будущую дату) с вердиктом; «Выплачено» — прошедшие по дате платежи текущего месяца + разовые в прошлом (статус не учитывается). Без кнопок действий. Удаление долга = завершение.
 - **Счета создаёт онбординг.** При вступлении в семью счета заранее не создаются: счета нового участника создаёт онбординг сразу с балансом карты и `family_id`; уже прошедшему онбординг при вступлении проставляется `family_id` у существующих счетов.
 - Если покупка ломает план — предупредить, но не запрещать.
 
@@ -127,7 +130,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 
 Скиллы лежат в `.agents/skills/`:
 - `telegram-bot` — паттерны aiogram, хендлеры, FSM.
-- `xlsx` — экспорт (Фаза 8).
+- `xlsx` — экспорт (Фаза 9).
 
 Загружай нужный скилл через инструмент `skill` и следуй его инструкциям.
 
@@ -151,8 +154,9 @@ python -m py_compile bot.py     # проверка синтаксиса
 | 1–5 | Онбординг, операции, долги, копилка/цели, семья | ✅ (см. CHANGELOG.md) |
 | 5.1 | Фиксы Фазы 5 | ✅ (см. CHANGELOG.md) |
 | 6 | Категории | ✅ (см. CHANGELOG.md) |
-| 7 | /can, советы, напоминания | ⏳ |
-| 8 | LLM-советник, экспорт | ⏳ |
+| 7 | Фикс беты — долги | ✅ (см. CHANGELOG.md) |
+| 8 | /can, советы, напоминания | ⏳ |
+| 9 | LLM-советник, экспорт | ⏳ |
 
 ## Что НЕ делать (глобально)
 
