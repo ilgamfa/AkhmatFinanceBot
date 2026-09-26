@@ -41,10 +41,16 @@ class IncomeType(StrEnum):
     IRREGULAR = "irregular"
 
 
-class DebtType(StrEnum):
-    """Тип обязательного платежа (Фаза 3)."""
+class PaymentStatus(StrEnum):
+    """Статус платежа по долгу (Фаза 7)."""
 
-    LOAN = "loan"
-    MORTGAGE = "mortgage"
-    CREDIT_CARD = "credit_card"
-    INSTALLMENT = "installment"
+    PENDING = "pending"
+    PAID = "paid"
+
+
+class DebtType(StrEnum):
+    """Тип заполнения долга (Фаза 7)."""
+
+    REGULAR = "regular"
+    SHORT = "short"
+    ONE = "one"

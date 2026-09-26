@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -86,17 +85,6 @@ def _times_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="2 раза", callback_data="onboarding:times_2"
                 ),
-            ]
-        ]
-    )
-
-
-def _refresh_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Да", callback_data="refresh:yes"),
-                InlineKeyboardButton(text="Нет", callback_data="refresh:no"),
             ]
         ]
     )
@@ -297,39 +285,10 @@ async def _finish(
     await message.answer(FINISH_TEXT)
 
 
-async def cmd_refresh(message: Message, state: FSMContext) -> None:
-    """Запрашивает подтверждение сброса данных."""
-    await state.clear()
-    await message.answer(
-        "Точно сбросить все данные и начать заново?",
-        reply_markup=_refresh_keyboard(),
-    )
-
-
-async def on_refresh_yes(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
-) -> None:
-    """[Да]: удаляет данные пользователя и запускает онбординг заново."""
-    await callback.answer()
-    if callback.from_user is None or not isinstance(callback.message, Message):
-        return
-    await users_repo.delete_user(session, callback.from_user.id)
-    await state.clear()
-    await show_intro(callback.message, state)
-
-
-async def on_refresh_no(callback: CallbackQuery, state: FSMContext) -> None:
-    """[Нет]: отменяет сброс."""
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await callback.message.answer("Отменено")
-
-
 def build_router() -> Router:
     """Создаёт роутер онбординга."""
     router = Router(name="onboarding")
 
-    router.message.register(cmd_refresh, Command("refresh"))
     router.callback_query.register(
         on_start_pressed, F.data == "onboarding:start"
     )
@@ -343,9 +302,6 @@ def build_router() -> Router:
     router.callback_query.register(
         on_times_pressed, F.data.in_({"onboarding:times_1", "onboarding:times_2"})
     )
-    router.callback_query.register(on_refresh_yes, F.data == "refresh:yes")
-    router.callback_query.register(on_refresh_no, F.data == "refresh:no")
-
     router.message.register(process_money_now, Onboarding.money_now)
     router.message.register(process_card_name, Onboarding.card_name)
     router.message.register(process_fixed_first, Onboarding.fixed_first)

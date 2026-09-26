@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
 from aiogram import F, Router
@@ -15,8 +16,8 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Debt, Family, FamilyMember, Transaction, User
-from models.base import IncomeType, TransactionType
+from models import Family, FamilyMember, Transaction, User
+from models.base import DebtType, IncomeType, TransactionType
 from services import (
     accounts_repo,
     categories_repo,
@@ -38,14 +39,24 @@ from utils.money import format_amount, format_rubles
 router = Router(name="stats")
 
 LAST_LIMIT = 5
-UPCOMING_DAYS = 30
 DEFAULT_MEMBER_NAME = "Участник"
 
 OVERALL_BUTTON = "📊 Общая"
 CALLBACK_FAMILY = "stats_family"
 CALLBACK_USER_PREFIX = "stats_user_"
 
+PAID_SUFFIX = " ✅"
+# Верхняя граница выборки будущих платежей (разовые долги показываются всегда).
+FAR_FUTURE = date(9999, 12, 31)
+
 _MD_SPECIAL = str.maketrans({char: f"\\{char}" for char in "_*`["})
+
+
+@dataclass
+class StatsScreen:
+    """Текст сводки."""
+
+    text: str
 
 
 def escape_markdown(text: str) -> str:
@@ -164,14 +175,48 @@ def genitive_name(name: str) -> str:
 
 
 def format_month_payment_line(
-    payment_date: date, debt: Debt, owner_name: str | None = None
+    payment_date: date,
+    debt_name: str,
+    amount: int,
+    owner_name: str | None = None,
 ) -> str:
     """Строка платежа: «25.09 — Кредит (Ильгам): 46 000 ₽»."""
     owner = f" ({escape_markdown(owner_name)})" if owner_name else ""
     return (
         f"{payment_date.strftime('%d.%m')} — "
-        f"{escape_markdown(debt.name)}{owner}: {format_amount(debt.amount)}"
+        f"{escape_markdown(debt_name)}{owner}: {format_amount(amount)}"
     )
+
+
+def format_payment_list_item(
+    payment_date: date,
+    debt_name: str,
+    amount: int,
+    owner_name: str | None = None,
+    suffix: str = "",
+) -> str:
+    """Строка платежа с пометкой: оплачено ✅ или просрочено ⏳."""
+    owner = f" ({escape_markdown(owner_name)})" if owner_name else ""
+    return (
+        f"{payment_date.strftime('%d.%m')} — "
+        f"{escape_markdown(debt_name)}{owner}: {format_amount(amount)}{suffix}"
+    )
+
+
+def render_payment_list(
+    header: str,
+    rows: list[tuple[date, int, str, str | None]],
+    suffix: str = "",
+) -> list[str]:
+    """Строки простого блока платежей: заголовок и по строке на платёж."""
+    lines = ["", header]
+    for payment_date, amount, debt_name, owner_name in rows:
+        lines.append(
+            format_payment_list_item(
+                payment_date, debt_name, amount, owner_name, suffix
+            )
+        )
+    return lines
 
 
 def format_verdict_line(
@@ -201,7 +246,7 @@ def render_month_payments(
             owner = verdict.owner_name if show_owner else None
             lines.append(
                 format_month_payment_line(
-                    verdict.payment_date, verdict.debt, owner
+                    verdict.payment_date, verdict.debt_name, verdict.amount, owner
                 )
             )
             lines.append(
@@ -215,20 +260,90 @@ async def _month_payment_groups(
     owners: list[tuple[int, str]],
     today: date,
 ) -> list[list[stats_service.PaymentVerdict]]:
-    """Вердикты по платежам владельцев до конца текущего месяца."""
-    days = (end_of_month(today) - today).days
+    """Вердикты по предстоящим платежам владельцев.
+
+    Регулярные и краткосрочные — до конца месяца; разовые — на любую
+    будущую дату.
+    """
+    month_end = end_of_month(today)
     balances: dict[int, int] = {}
-    payments: list[tuple[date, Debt, int, str]] = []
+    payments: list[tuple[date, int, str, int, str]] = []
     for owner_id, owner_name in owners:
         balances[owner_id] = await accounts_repo.get_balance(
             session, owner_id, "card"
         )
-        for payment_date, debt in await debts_repo.get_upcoming_payments(
-            session, owner_id, days, today
-        ):
-            payments.append((payment_date, debt, owner_id, owner_name))
+        pairs = await debts_repo.get_pending_payments(
+            session, owner_id, today, FAR_FUTURE
+        )
+        for payment, debt in pairs:
+            payment_date = date.fromisoformat(payment.due_date)
+            if debt.type != DebtType.ONE.value and payment_date > month_end:
+                continue
+            payments.append(
+                (
+                    payment_date,
+                    payment.amount,
+                    debt.name,
+                    owner_id,
+                    owner_name,
+                )
+            )
     payments.sort(key=lambda item: item[0])
     return stats_service.build_payment_verdicts(payments, balances)
+
+
+async def _paid_rows(
+    session: AsyncSession,
+    owners: list[tuple[int, str]],
+    *,
+    show_owner: bool,
+    today: date,
+) -> list[tuple[date, int, str, str | None]]:
+    """Строки выплаченного: прошедшие платежи месяца + разовые в прошлом.
+
+    Прошедший по дате платёж считается выплаченным независимо от статуса.
+    """
+    rows: list[tuple[date, int, str, str | None]] = []
+    for owner_id, owner_name in owners:
+        for payment, debt in await debts_repo.get_paid_payments(
+            session, owner_id, today, today
+        ):
+            if debt.type == DebtType.ONE.value:
+                continue
+            rows.append(
+                (
+                    date.fromisoformat(payment.due_date),
+                    payment.amount,
+                    debt.name,
+                    owner_name if show_owner else None,
+                )
+            )
+        for debt in await debts_repo.get_debts(session, owner_id):
+            if debt.type != DebtType.ONE.value:
+                continue
+            for payment in await debts_repo.get_payments(session, debt.id):
+                payment_date = date.fromisoformat(payment.due_date)
+                if payment_date < today:
+                    rows.append(
+                        (
+                            payment_date,
+                            payment.amount,
+                            debt.name,
+                            owner_name if show_owner else None,
+                        )
+                    )
+    rows.sort(key=lambda item: item[0])
+    return rows
+
+
+async def _pending_until(
+    session: AsyncSession, telegram_id: int, today: date, until_date: date
+) -> int:
+    """Сумма неоплаченных платежей от сегодня до ``until_date`` включительно."""
+    pairs = await debts_repo.get_pending_payments(
+        session, telegram_id, today, until_date
+    )
+    return sum(payment.amount for payment, _ in pairs)
 
 
 def format_family_transaction_line(
@@ -263,10 +378,10 @@ def member_label(member_id: int | None, own_id: int, name: str | None) -> str:
 # --- одиночная сводка ---------------------------------------------------------
 
 
-async def build_solo_stats_text(
+async def _solo_screen(
     session: AsyncSession, user: User, today: date | None = None
-) -> str:
-    """Собирает текст сводки для пользователя без семьи."""
+) -> StatsScreen:
+    """Собирает сводку для пользователя без семьи."""
     today = today or datetime.now(UTC).date()
     free_money = await accounts_repo.get_balance(session, user.telegram_id, "card")
     lines = [f"*Свободно:* {format_amount(free_money)}"]
@@ -276,43 +391,35 @@ async def build_solo_stats_text(
         lines.append("")
         lines.extend(income_lines)
 
-    groups = await _month_payment_groups(
-        session, [(user.telegram_id, "")], today
-    )
+    owners = [(user.telegram_id, "")]
+    groups = await _month_payment_groups(session, owners, today)
     if groups:
         lines.append("")
         lines.extend(
-            render_month_payments(
-                groups, "*Платежи до конца месяца:*", show_owner=False
-            )
+            render_month_payments(groups, "*Предстоящие:*", show_owner=False)
         )
+
+    paid = await _paid_rows(session, owners, show_owner=False, today=today)
+    if paid:
+        lines.extend(render_payment_list("*Выплачено:*", paid, PAID_SUFFIX))
 
     debts = await debts_repo.get_debts(session, user.telegram_id)
     if debts:
         salary_date = next_salary_date(user, today)
         month_end = end_of_month(today)
-        until_salary = 0
-        until_month_end = 0
-        for debt in debts:
-            dates = debts_repo.payments_within(
-                debt.payment_day, today, UPCOMING_DAYS
-            )
-            if salary_date is not None:
-                until_salary += sum(
-                    debt.amount
-                    for payment_date in dates
-                    if payment_date <= salary_date
-                )
-            until_month_end += sum(
-                debt.amount for payment_date in dates if payment_date <= month_end
-            )
 
         lines.append("")
         if salary_date is not None:
+            until_salary = await _pending_until(
+                session, user.telegram_id, today, salary_date
+            )
             lines.append(
                 f"*Свободно до ЗП:* "
                 f"{format_amount(free_money - until_salary)}"
             )
+        until_month_end = await _pending_until(
+            session, user.telegram_id, today, month_end
+        )
         lines.append(
             f"*Свободно до конца месяца:* "
             f"{format_amount(free_money - until_month_end)}"
@@ -380,19 +487,19 @@ async def build_solo_stats_text(
     )
     lines.extend(format_top_categories_lines(top))
 
-    return "\n".join(lines)
+    return StatsScreen(text="\n".join(lines))
 
 
 # --- семейные сводки (Фаза 5.1) ----------------------------------------------
 
 
-async def build_family_stats_text(
+async def _family_screen(
     session: AsyncSession,
     user: User,
     family: Family,
     today: date | None = None,
     members: list[FamilyMember] | None = None,
-) -> str:
+) -> StatsScreen:
     """Собирает «Общую» семейную сводку: счета обоих, свободно, цели, операции."""
     today = today or datetime.now(UTC).date()
     if members is None:
@@ -432,10 +539,12 @@ async def build_family_stats_text(
     if groups:
         lines.append("")
         lines.extend(
-            render_month_payments(
-                groups, "*Платежи до конца месяца:*", show_owner=True
-            )
+            render_month_payments(groups, "*Предстоящие:*", show_owner=True)
         )
+
+    paid = await _paid_rows(session, owners, show_owner=True, today=today)
+    if paid:
+        lines.extend(render_payment_list("*Выплачено:*", paid, PAID_SUFFIX))
 
     goals = await goals_repo.get_goals(session, user.telegram_id)
     progress = await goals_repo.get_progress_by_goals(
@@ -480,15 +589,15 @@ async def build_family_stats_text(
     )
     lines.extend(format_top_categories_lines(top))
 
-    return "\n".join(lines)
+    return StatsScreen(text="\n".join(lines))
 
 
-async def build_member_stats_text(
+async def _member_screen(
     session: AsyncSession,
     member_id: int,
     name: str,
     today: date | None = None,
-) -> str:
+) -> StatsScreen:
     """Собирает «Мою» сводку участника: только его счета, платежи, операции."""
     today = today or datetime.now(UTC).date()
     card = await accounts_repo.get_balance(session, member_id, "card")
@@ -503,12 +612,17 @@ async def build_member_stats_text(
         f"*Свободно:* {format_amount(card)}",
     ]
 
-    groups = await _month_payment_groups(session, [(member_id, name)], today)
+    owners = [(member_id, name)]
+    groups = await _month_payment_groups(session, owners, today)
     if groups:
         lines.append("")
         lines.extend(
             render_month_payments(groups, "*Мои платежи:*", show_owner=False)
         )
+
+    paid = await _paid_rows(session, owners, show_owner=False, today=today)
+    if paid:
+        lines.extend(render_payment_list("*Выплачено:*", paid, PAID_SUFFIX))
 
     goals = await goals_repo.get_goals(session, member_id)
     progress = await goals_repo.get_progress_by_goals(
@@ -538,26 +652,70 @@ async def build_member_stats_text(
     )
     lines.extend(format_top_categories_lines(top))
 
-    return "\n".join(lines)
+    return StatsScreen(text="\n".join(lines))
 
 
-def build_stats_keyboard(
-    members: list[FamilyMember],
+def _compose_keyboard(
+    screen: StatsScreen,
+    view: str,
+    actor_id: int,
+    members: list[FamilyMember] | None = None,
 ) -> InlineKeyboardMarkup | None:
-    """Кнопки [📊 Общая] и [👤 Имя] для семьи. None, если участник один."""
-    if len(members) < 2:
-        return None
-    buttons = [
-        InlineKeyboardButton(text=OVERALL_BUTTON, callback_data=CALLBACK_FAMILY)
-    ]
-    buttons.extend(
-        InlineKeyboardButton(
-            text=f"👤 {member_name(member)}",
-            callback_data=f"{CALLBACK_USER_PREFIX}{member.telegram_id}",
+    """Собирает клавиатуру: только переключатель видов семьи (Фаза 5.1)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if members is not None and len(members) >= 2:
+        member_row = [
+            InlineKeyboardButton(
+                text=OVERALL_BUTTON, callback_data=CALLBACK_FAMILY
+            )
+        ]
+        member_row.extend(
+            InlineKeyboardButton(
+                text=f"👤 {member_name(member)}",
+                callback_data=f"{CALLBACK_USER_PREFIX}{member.telegram_id}",
+            )
+            for member in members
         )
-        for member in members
+        rows.append(member_row)
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def build_view(
+    session: AsyncSession,
+    actor: User,
+    view: str,
+    today: date | None = None,
+) -> tuple[str, InlineKeyboardMarkup | None] | None:
+    """Пересобирает экран /stats в указанном виде (solo/fam/u<id>)."""
+    today = today or datetime.now(UTC).date()
+    if view == "solo":
+        screen = await _solo_screen(session, actor, today)
+        return screen.text, _compose_keyboard(screen, "solo", actor.telegram_id)
+
+    loaded = await _load_family(session, actor.telegram_id)
+    if loaded is None:
+        return None
+    family, members = loaded
+    if view == "fam":
+        screen = await _family_screen(session, actor, family, today, members)
+        return screen.text, _compose_keyboard(
+            screen, "fam", actor.telegram_id, members
+        )
+
+    if not view.startswith("u") or not view[1:].isdigit():
+        return None
+    target_id = int(view[1:])
+    target = next(
+        (member for member in members if member.telegram_id == target_id), None
     )
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    if target is None:
+        return None
+    screen = await _member_screen(session, target_id, member_name(target), today)
+    return screen.text, _compose_keyboard(
+        screen, view, actor.telegram_id, members
+    )
 
 
 async def build_stats_screen(
@@ -566,11 +724,11 @@ async def build_stats_screen(
     """Экран /stats по умолчанию: «Общая» с кнопками или соло без кнопок."""
     today = today or datetime.now(UTC).date()
     family = await family_repo.get_family(session, user.telegram_id)
-    if family is None:
-        return await build_solo_stats_text(session, user, today), None
-    members = await family_repo.get_family_members(session, family.id)
-    text = await build_family_stats_text(session, user, family, today, members)
-    return text, build_stats_keyboard(members)
+    view = "fam" if family is not None else "solo"
+    rendered = await build_view(session, user, view, today)
+    if rendered is None:
+        return "", None
+    return rendered
 
 
 async def _safe_edit(
@@ -612,57 +770,39 @@ async def cmd_stats(message: Message, session: AsyncSession) -> None:
     await message.answer(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
+async def _rerender(
+    callback: CallbackQuery, session: AsyncSession, view: str
+) -> None:
+    """Перерисовывает сообщение /stats в указанном виде."""
+    if callback.from_user is None or not isinstance(callback.message, Message):
+        return
+    user = await users_repo.get_by_telegram_id(session, callback.from_user.id)
+    if user is None:
+        return
+    rendered = await build_view(session, user, view)
+    if rendered is None:
+        return
+    text, keyboard = rendered
+    await _safe_edit(callback.message, text, keyboard)
+
+
 async def on_stats_family(
     callback: CallbackQuery, session: AsyncSession
 ) -> None:
     """[📊 Общая]: показывает общую семейную статистику."""
     await callback.answer()
-    if callback.from_user is None or not isinstance(callback.message, Message):
-        return
-
-    user = await users_repo.get_by_telegram_id(session, callback.from_user.id)
-    if user is None:
-        return
-    loaded = await _load_family(session, user.telegram_id)
-    if loaded is None:
-        return
-    family, members = loaded
-    text = await build_family_stats_text(session, user, family, members=members)
-    await _safe_edit(callback.message, text, build_stats_keyboard(members))
+    await _rerender(callback, session, "fam")
 
 
 async def on_stats_user(callback: CallbackQuery, session: AsyncSession) -> None:
     """[👤 Имя]: показывает статистику участника семьи."""
     await callback.answer()
-    if (
-        callback.from_user is None
-        or callback.data is None
-        or not isinstance(callback.message, Message)
-    ):
+    if callback.data is None:
         return
-
     target_raw = callback.data[len(CALLBACK_USER_PREFIX) :]
     if not target_raw.isdigit():
         return
-    target_id = int(target_raw)
-
-    user = await users_repo.get_by_telegram_id(session, callback.from_user.id)
-    if user is None:
-        return
-    loaded = await _load_family(session, user.telegram_id)
-    if loaded is None:
-        return
-    _, members = loaded
-    target = next(
-        (member for member in members if member.telegram_id == target_id), None
-    )
-    if target is None:
-        return
-
-    text = await build_member_stats_text(
-        session, target_id, member_name(target)
-    )
-    await _safe_edit(callback.message, text, build_stats_keyboard(members))
+    await _rerender(callback, session, f"u{int(target_raw)}")
 
 
 def build_router() -> Router:
