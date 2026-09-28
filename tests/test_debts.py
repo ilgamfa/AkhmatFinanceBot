@@ -1,23 +1,25 @@
-"""Тесты долгов, /stats и /refresh Фазы 3 (управление кнопками)."""
+"""Тесты долгов, платежей и /stats Фазы 7."""
 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from services import (
-    accounts_repo,
-    allocations_repo,
-    debts_repo,
-    goals_repo,
-    users_repo,
-)
+from models.base import DebtType, PaymentStatus
+from services import debts_repo
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
+
+TODAY = datetime.now(UTC).date()
+PAST_THIS_MONTH = TODAY - timedelta(days=1)
+FUTURE = TODAY + timedelta(days=40)
+PAST = TODAY - timedelta(days=40)
+ADDED_TEXT = "Долг добавлен. Удалить можно в /debts."
 
 
 def _button_labels(bot: object) -> list[str]:
@@ -38,409 +40,409 @@ async def _onboard(send_message: Send, send_callback: Press) -> None:
 
 
 async def _add_debt(
-    send_message: Send,
-    send_callback: Press,
+    session: AsyncSession,
+    telegram_id: int = 1,
     name: str = "Кредит",
-    amount: str = "46000",
-    day: str = "25",
-    debt_type: str = "loan",
-) -> None:
-    await send_message("/debts")
-    await send_callback("debts:add")
-    await send_message(name)
-    await send_callback(f"debt_type:{debt_type}")
-    await send_message(amount)
-    await send_message(day)
+    amount: int = 46000,
+    due_date: date | None = None,
+    debt_type: str = DebtType.REGULAR.value,
+) -> tuple[int, int]:
+    """Создаёт долг с одним платежом. Возвращает (debt_id, payment_id)."""
+    debt = await debts_repo.create_debt(session, telegram_id, name, debt_type)
+    payment = await debts_repo.add_payment(
+        session, debt.id, amount, due_date or TODAY
+    )
+    return debt.id, payment.id
 
 
-def _today_day() -> str:
-    """День платежа, который гарантированно входит в текущий месяц."""
-    return str(datetime.now(UTC).date().day)
+# --- 1. репозиторий ----------------------------------------------------------
 
 
-# --- 3.1 репозиторий ---------------------------------------------------------
-
-
-async def test_add_debt(session: AsyncSession) -> None:
-    debt = await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+async def test_create_debt_and_add_payment(session: AsyncSession) -> None:
+    debt = await debts_repo.create_debt(session, 1, "Кредит")
     assert debt.id is not None
     assert debt.telegram_id == 1
-    assert debt.type == "loan"
-    assert debt.amount == 46000
-    assert debt.payment_day == 25
+    assert debt.name == "Кредит"
+    assert debt.type == DebtType.REGULAR.value
     assert debt.created_at
 
+    payment = await debts_repo.add_payment(session, debt.id, 46000, TODAY)
+    assert payment.id is not None
+    assert payment.debt_id == debt.id
+    assert payment.amount == 46000
+    assert payment.due_date == TODAY.isoformat()
+    assert payment.status == PaymentStatus.PENDING.value
+    assert payment.paid_at is None
 
-async def test_get_debts(session: AsyncSession) -> None:
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    await debts_repo.add_debt(session, 1, "Ипотека", "mortgage", 61000, 30)
-    await debts_repo.add_debt(session, 2, "Чужой", "loan", 1, 1)
+
+async def test_get_debts_and_payments(session: AsyncSession) -> None:
+    first = await debts_repo.create_debt(session, 1, "Кредит")
+    await debts_repo.create_debt(session, 1, "Ипотека")
+    await debts_repo.create_debt(session, 2, "Чужой")
+    await debts_repo.add_payment(session, first.id, 1000, TODAY)
+    await debts_repo.add_payment(session, first.id, 2000, TODAY + timedelta(days=30))
 
     debts = await debts_repo.get_debts(session, 1)
     assert [debt.name for debt in debts] == ["Кредит", "Ипотека"]
+    payments = await debts_repo.get_payments(session, first.id)
+    assert [payment.amount for payment in payments] == [1000, 2000]
 
 
-async def test_delete_debt(session: AsyncSession) -> None:
-    debt = await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    assert await debts_repo.delete_debt(session, 1, debt.id) is True
+async def test_get_pending_and_paid_queries(session: AsyncSession) -> None:
+    _, pending_id = await _add_debt(session, name="Кредит", due_date=TODAY)
+    _, past_id = await _add_debt(session, name="Ипотека", due_date=PAST_THIS_MONTH)
+
+    pending = await debts_repo.get_pending_payments(session, 1, TODAY, FUTURE)
+    assert [payment.id for payment, _ in pending] == [pending_id]
+
+    paid = await debts_repo.get_paid_payments(session, 1, TODAY, TODAY)
+    assert past_id in [payment.id for payment, _ in paid]
+
+
+async def test_update_debt_schedule_regenerates(session: AsyncSession) -> None:
+    """Правка числа месяца и суммы пересобирает платежи регулярного долга."""
+    debt = await debts_repo.create_debt(session, 1, "Кредит", DebtType.REGULAR.value)
+    for due_date in debts_repo.monthly_dates(
+        debts_repo.next_payment_date(5, TODAY), 3
+    ):
+        await debts_repo.add_payment(session, debt.id, 10000, due_date)
+
+    await debts_repo.update_debt_schedule(session, debt.id, 50000, 20)
+
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert all(payment.amount == 50000 for payment in payments)
+    assert {date.fromisoformat(payment.due_date).day for payment in payments} == {20}
+
+
+# --- 9. mark_paid ------------------------------------------------------------
+
+
+async def test_mark_paid_changes_status(session: AsyncSession) -> None:
+    _, payment_id = await _add_debt(session)
+    payment = await debts_repo.mark_paid(session, payment_id)
+    assert payment is not None
+    assert payment.status == PaymentStatus.PAID.value
+    assert payment.paid_at is not None
+
+
+# --- 10. delete_debt ---------------------------------------------------------
+
+
+async def test_delete_debt_removes_payments(session: AsyncSession) -> None:
+    debt_id, _ = await _add_debt(session)
+    assert await debts_repo.delete_debt(session, debt_id) is True
     assert await debts_repo.get_debts(session, 1) == []
-    assert await debts_repo.delete_debt(session, 1, debt.id) is False
+    assert await debts_repo.get_payments(session, debt_id) == []
+    assert await debts_repo.delete_debt(session, debt_id) is False
 
 
-async def test_get_upcoming_payments(session: AsyncSession) -> None:
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    await debts_repo.add_debt(session, 1, "Кредитка", "credit_card", 8000, 5)
-
-    payments = await debts_repo.get_upcoming_payments(
-        session, 1, 30, today=date(2026, 9, 20)
-    )
-    assert [(day, debt.name) for day, debt in payments] == [
-        (date(2026, 9, 25), "Кредит"),
-        (date(2026, 10, 5), "Кредитка"),
-    ]
+# --- 2–4. способы заполнения -------------------------------------------------
 
 
-async def test_get_upcoming_payments_short_window(session: AsyncSession) -> None:
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
-    payments = await debts_repo.get_upcoming_payments(
-        session, 1, 3, today=date(2026, 9, 20)
-    )
-    assert payments == []
-
-
-# --- 3.2 /debts: список и кнопки ---------------------------------------------
-
-
-async def test_debts_empty_shows_add_button_only(
-    send_message: Send, send_callback: Press, bot: object
-) -> None:
-    await _onboard(send_message, send_callback)
-    replies = await send_message("/debts")
-    assert "нет долгов" in replies[0]
-    labels = _button_labels(bot)
-    assert "➕ Добавить долг" in labels
-    assert "🗑 Удалить долг" not in labels
-
-
-async def test_debts_shows_list_total_and_buttons(
-    send_message: Send, send_callback: Press, bot: object
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-    await _add_debt(
-        send_message, send_callback, "Ипотека", "61000", "30", "mortgage"
-    )
-
-    text = (await send_message("/debts"))[0]
-    assert "1. Кредит — 46 000 ₽, 25 числа" in text
-    assert "2. Ипотека — 61 000 ₽, 30 числа" in text
-    assert "Итого в месяц: 107 000 ₽" in text
-
-    labels = _button_labels(bot)
-    assert "➕ Добавить долг" in labels
-    assert "🗑 Удалить долг" in labels
-
-
-# --- 3.3 добавление и удаление кнопками --------------------------------------
-
-
-async def test_debts_add_flow(
+async def test_regular_flow_generates_payments(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
     await send_message("/debts")
-    replies = await send_callback("debts:add")
-    assert "Название долга?" in replies[0]
-    await send_message("Кредитка")
-    await send_callback("debt_type:credit_card")
-    await send_message("8000")
-    replies = await send_message("5")
-    assert "Долг добавлен: Кредитка — 8 000 ₽, 5 числа" in replies[0]
+    descriptions = await send_callback("debts:add")
+    assert "Какой тип долга?" in descriptions[0]
+    assert "12" not in descriptions[0]
+    replies = await send_callback("debt_method:regular")
+    assert "Название" in replies[0]
+    await send_message("Кредит")
+    await send_message("46000")
+    replies = await send_message("25")
+    assert ADDED_TEXT in replies[0]
 
-    debts = await debts_repo.get_debts(session, 1)
-    assert len(debts) == 1
-    assert debts[0].type == "credit_card"
-    assert debts[0].payment_day == 5
+    debt = (await debts_repo.get_debts(session, 1))[0]
+    assert debt.type == DebtType.REGULAR.value
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert len(payments) == 12
+    assert payments[0].due_date == debts_repo.next_payment_date(25, TODAY).isoformat()
+    assert all(payment.amount == 46000 for payment in payments)
+    # каждый месяц в один день
+    assert {date.fromisoformat(payment.due_date).day for payment in payments} == {25}
 
 
-async def test_debts_delete_shows_list_with_buttons(
+async def test_short_flow_generates_n(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await send_message("/debts")
+    await send_callback("debts:add")
+    await send_callback("debt_method:short")
+    await send_message("Рассрочка")
+    replies = await send_message("3")
+    assert "Дата платежа 1 из 3" in replies[0]
+    await send_message("25.10.2026")
+    await send_message("10000")
+    await send_message("25.11.2026")
+    await send_message("20000")
+    await send_message("25.12.2026")
+    replies = await send_message("30000")
+    assert ADDED_TEXT in replies[0]
+
+    debt = (await debts_repo.get_debts(session, 1))[0]
+    assert debt.type == DebtType.SHORT.value
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert [payment.amount for payment in payments] == [10000, 20000, 30000]
+
+
+async def test_short_flow_allows_single_payment(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Краткосрочный с одним платежом допустим (N >= 1)."""
+    await _onboard(send_message, send_callback)
+    await send_message("/debts")
+    await send_callback("debts:add")
+    await send_callback("debt_method:short")
+    await send_message("Рассрочка")
+    replies = await send_message("1")
+    assert "Дата платежа 1 из 1" in replies[0]
+    await send_message("25.10.2026")
+    replies = await send_message("5000")
+    assert ADDED_TEXT in replies[0]
+
+    debt = (await debts_repo.get_debts(session, 1))[0]
+    assert debt.type == DebtType.SHORT.value
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert len(payments) == 1
+
+
+async def test_one_flow_creates_single_payment(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await send_message("/debts")
+    await send_callback("debts:add")
+    await send_callback("debt_method:one")
+    await send_message("Штраф")
+    await send_message("5000")
+    replies = await send_message("01.10.2026")
+    assert ADDED_TEXT in replies[0]
+
+    debt = (await debts_repo.get_debts(session, 1))[0]
+    assert debt.type == DebtType.ONE.value
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert len(payments) == 1
+    assert payments[0].due_date == "2026-10-01"
+
+
+# --- 5–8. /stats -------------------------------------------------------------
+
+
+async def test_stats_shows_upcoming(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(session, amount=46000, due_date=TODAY)
+
+    text = (await send_message("/stats"))[0]
+    assert "*Предстоящие:*" in text
+    assert "— Кредит: 46 000 ₽" in text
+    assert "Свободно: 12 000 ₽ — не хватает ❌ (нужно ещё 34 000 ₽)" in text
+
+
+@pytest.mark.skipif(
+    PAST_THIS_MONTH.month != TODAY.month,
+    reason="1-е число месяца: прошлых дней в текущем месяце нет",
+)
+async def test_stats_shows_paid(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(session, amount=7000, due_date=PAST_THIS_MONTH)
+
+    text = (await send_message("/stats"))[0]
+    assert "*Выплачено:*" in text
+    assert "— Кредит: 7 000 ₽ ✅" in text
+
+
+async def test_stats_one_future_in_upcoming(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(
+        session,
+        name="Штраф",
+        amount=5000,
+        due_date=FUTURE,
+        debt_type=DebtType.ONE.value,
+    )
+
+    text = (await send_message("/stats"))[0]
+    assert "*Предстоящие:*" in text
+    assert "— Штраф: 5 000 ₽" in text
+
+
+async def test_stats_one_past_in_paid(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    await _onboard(send_message, send_callback)
+    await _add_debt(
+        session,
+        name="Штраф",
+        amount=5000,
+        due_date=PAST,
+        debt_type=DebtType.ONE.value,
+    )
+
+    text = (await send_message("/stats"))[0]
+    assert "*Выплачено:*" in text
+    assert "— Штраф: 5 000 ₽ ✅" in text
+
+
+async def test_stats_hides_blocks_when_empty(
+    send_message: Send, send_callback: Press
+) -> None:
+    await _onboard(send_message, send_callback)
+    text = (await send_message("/stats"))[0]
+    assert "*Предстоящие:*" not in text
+    assert "*Выплачено:*" not in text
+    assert "*Просрочено:*" not in text
+    assert "*Продлить долги:*" not in text
+
+
+# --- UI: список, удаление, редактирование ------------------------------------
+
+
+async def test_debts_list_format(
     send_message: Send, send_callback: Press, session: AsyncSession, bot: object
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-    await _add_debt(
-        send_message, send_callback, "Ипотека", "61000", "30", "mortgage"
-    )
-
-    replies = await send_callback("debts:del")
-    assert "Выбери долг для удаления:" in replies[0]
+    empty = await send_message("/debts")
+    assert "нет долгов" in empty[0]
     labels = _button_labels(bot)
-    assert "1. Кредит — 46 000 ₽, 25 числа" in labels
-    assert "2. Ипотека — 61 000 ₽, 30 числа" in labels
-    assert "❌ Отмена" in labels
+    assert "➕ Добавить" in labels
+    assert "🗑 Удалить" not in labels
 
-    debts = await debts_repo.get_debts(session, 1)
-    assert len(debts) == 2
+    # регулярный — «сумма/мес, N числа»
+    regular = await debts_repo.create_debt(session, 1, "Кредит", DebtType.REGULAR.value)
+    for due_date in debts_repo.monthly_dates(
+        debts_repo.next_payment_date(25, TODAY), 12
+    ):
+        await debts_repo.add_payment(session, regular.id, 46000, due_date)
+    # краткосрочный — «N платежа, следующий дата»
+    short = await debts_repo.create_debt(session, 1, "Кредитка", DebtType.SHORT.value)
+    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 10, 5))
+    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 11, 5))
+    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 12, 5))
+    # разовый — «сумма, дата»
+    one = await debts_repo.create_debt(session, 1, "Друг", DebtType.ONE.value)
+    await debts_repo.add_payment(session, one.id, 44000, date(TODAY.year, 10, 7))
+
+    text = (await send_message("/debts"))[0]
+    assert "Твои долги:" in text
+    assert "1. Кредит — 46 000 ₽/мес, 25 числа" in text
+    assert "2. Кредитка — 3 платежа, следующий 05.10" in text
+    assert "3. Друг — 44 000 ₽, 07.10" in text
+    assert "Неоплаченных платежей" not in text
+    labels = _button_labels(bot)
+    assert "✏️ Редактировать" in labels
+    assert "🗑 Удалить" in labels
 
 
 async def test_debts_delete_by_button(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-    debt = (await debts_repo.get_debts(session, 1))[0]
+    debt_id, _ = await _add_debt(session)
 
-    replies = await send_callback(f"debt_del:{debt.id}")
+    await send_message("/debts")
+    replies = await send_callback("debts:del")
+    assert "Выбери долг для удаления:" in replies[0]
+    replies = await send_callback(f"debt_del:{debt_id}")
     assert "Долг удалён: Кредит" in replies[0]
     assert await debts_repo.get_debts(session, 1) == []
+    assert await debts_repo.get_payments(session, debt_id) == []
 
 
-async def test_debts_delete_cancel(
+async def test_debts_edit_name(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    debt_id, _ = await _add_debt(session, name="Кредит", due_date=TODAY)
 
-    replies = await send_callback("debt_del:cancel")
-    assert "Отменено" in replies[0]
-    assert len(await debts_repo.get_debts(session, 1)) == 1
-
-
-async def test_debts_delete_when_empty(send_message: Send, send_callback: Press) -> None:
-    await _onboard(send_message, send_callback)
-    replies = await send_callback("debts:del")
-    assert "нет долгов" in replies[0]
-
-
-async def test_debts_delete_not_found(send_message: Send, send_callback: Press) -> None:
-    await _onboard(send_message, send_callback)
-    replies = await send_callback("debt_del:999")
-    assert "не найден" in replies[0]
-
-
-async def test_debts_add_invalid_day(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
     await send_message("/debts")
-    await send_callback("debts:add")
-    await send_message("Кредит")
-    await send_callback("debt_type:loan")
-    await send_message("1000")
-    replies = await send_message("99")
-    assert "от 1 до 31" in replies[0]
-    assert await debts_repo.get_debts(session, 1) == []
-
-
-# --- 3.4 /stats --------------------------------------------------------------
-
-
-async def test_stats_shows_upcoming_payments(
-    send_message: Send, send_callback: Press
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", _today_day())
-
-    text = (await send_message("/stats"))[0]
-    assert "*Платежи до конца месяца:*" in text
-    assert "— Кредит: 46 000 ₽" in text
-    assert "Свободно: 12 000 ₽ — не хватает ❌ (нужно ещё 34 000 ₽)" in text
-
-
-async def test_stats_no_debts_hides_payments(
-    send_message: Send, send_callback: Press
-) -> None:
-    await _onboard(send_message, send_callback)
-    text = (await send_message("/stats"))[0]
-    assert "*Платежи до конца месяца:*" not in text
-    assert "Свободно до ЗП:" not in text
-    assert "Свободно до конца месяца:" not in text
-
-
-async def test_stats_free_until_month_end(
-    send_message: Send, send_callback: Press
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-
-    text = (await send_message("/stats"))[0]
-    assert "Свободно до ЗП:" in text
-    assert "Свободно до конца месяца:" in text
-
-
-async def test_stats_full_format(
-    send_message: Send, send_callback: Press
-) -> None:
-    """Полный формат /stats: доход, платежи, свободно до, операции, сальдо."""
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", _today_day())
-    await send_message("/plus 100000")
-    await send_message("/minus 4200")
-
-    text = (await send_message("/stats"))[0]
-    blocks = text.split("\n\n")
-    assert "*Свободно:* 107 800 ₽" in text
-    assert "*Доход:*\n10 числа — 50 000 ₽" in text
-    assert "*Платежи до конца месяца:*" in text
-    assert "— Кредит: 46 000 ₽" in text
-    assert "Свободно: 107 800 ₽ — хватает ✅" in text
-    assert "Свободно до ЗП:" in text
-    assert "Свободно до конца месяца:" in text
-    assert "*Последние операции:*" in text
-    assert "−4 200 ₽ (сегодня)" in text
-    assert "+100 000 ₽ (сегодня)" in text
-    assert "*За сегодня:* +95 800 ₽" in text
-    assert blocks[-1].startswith("*За сегодня:*")
-
-
-async def test_stats_irregular_hides_until_salary(
-    send_message: Send, send_callback: Press
-) -> None:
-    await send_message("/start")
-    await send_callback("onboarding:start")
-    await send_message("5000")
-    await send_callback("onboarding:income_irregular")
-    await send_message("90000")
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-
-    text = (await send_message("/stats"))[0]
-    assert "Свободно до ЗП:" not in text
-    assert "Свободно до конца месяца:" in text
-    assert "*Доход:* нерегулярный" in text
-    assert "Среднее в месяц: 90 000 ₽" in text
-
-
-# --- 3.5 /refresh ------------------------------------------------------------
-
-
-async def test_refresh_asks_confirmation(
-    send_message: Send, send_callback: Press
-) -> None:
-    await _onboard(send_message, send_callback)
-    replies = await send_message("/refresh")
-    assert "Точно сбросить" in replies[0]
-
-
-async def test_refresh_no_cancels(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
-    await send_message("/refresh")
-    replies = await send_callback("refresh:no")
-    assert "Отменено" in replies[0]
-    assert await users_repo.get_by_telegram_id(session, 1) is not None
-
-
-async def test_refresh_yes_resets_and_restarts(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback)
-    await send_message("/minus 1000")
-
-    await send_message("/refresh")
-    replies = await send_callback("refresh:yes")
-    assert "карманный финсоветник" in replies[0]
-
-    assert await users_repo.get_by_telegram_id(session, 1) is None
-    assert await debts_repo.get_debts(session, 1) == []
-
-
-async def test_refresh_yes_deletes_goals_savings_and_allocations(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
-    savings = await accounts_repo.ensure_account(session, 1, "savings")
-    await accounts_repo.correct_balance(session, savings.id, 50000)
-    goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
-    await allocations_repo.allocate(session, goal.id, 40000)
-    goal_id = goal.id
-
-    await send_message("/refresh")
-    await send_callback("refresh:yes")
-
-    session.expire_all()
-    assert await goals_repo.get_goals(session, 1) == []
-    assert await allocations_repo.get_allocations_by_goal(session, goal_id) == []
-    assert await accounts_repo.get_balance(session, 1, "savings") == 0
-
-
-# --- 4.6 редактирование долгов ------------------------------------------------
-
-
-async def test_debts_edit_shows_list_with_buttons(
-    send_message: Send, send_callback: Press, session: AsyncSession, bot: object
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-
-    replies = await send_callback("debts:edit")
-    assert "Выбери долг для редактирования:" in replies[0]
-    labels = _button_labels(bot)
-    assert "1. Кредит — 46 000 ₽, 25 числа" in labels
-    assert "❌ Отмена" in labels
-
-    debt = (await debts_repo.get_debts(session, 1))[0]
-    replies = await send_callback(f"debt_edit:{debt.id}")
-    assert "Что изменить?" in replies[0]
-    labels = _button_labels(bot)
-    assert "Название" in labels
-    assert "Сумма" in labels
-    assert "Дата" in labels
-
-
-async def test_debts_edit_amount_flow(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-    debt = (await debts_repo.get_debts(session, 1))[0]
-
     await send_callback("debts:edit")
-    await send_callback(f"debt_edit:{debt.id}")
-    replies = await send_callback("debt_field:amount")
-    assert "Новая сумма платежа?" in replies[0]
-    replies = await send_message("50000")
-    assert "Долг обновлён: Кредит — 50 000 ₽, 25 числа" in replies[0]
+    replies = await send_callback(f"debt_edit:{debt_id}")
+    assert "Кредит" in replies[0]
+    replies = await send_callback(f"debt_ename:{debt_id}")
+    assert "Новое название" in replies[0]
+    replies = await send_message("Автокредит")
+    assert "переименован: Автокредит" in replies[0]
 
-    session.expire_all()
-    stored = (await debts_repo.get_debts(session, 1))[0]
-    assert stored.amount == 50000
-
-
-async def test_debts_edit_name_and_day(
-    send_message: Send, send_callback: Press, session: AsyncSession
-) -> None:
-    await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
-    debt = (await debts_repo.get_debts(session, 1))[0]
-
-    await send_callback("debts:edit")
-    await send_callback(f"debt_edit:{debt.id}")
-    await send_callback("debt_field:name")
-    await send_message("Автокредит")
     session.expire_all()
     stored = (await debts_repo.get_debts(session, 1))[0]
     assert stored.name == "Автокредит"
 
+
+async def test_debts_edit_regular_schedule(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Правка регулярного долга: число месяца и сумма, платежи пересобираются."""
+    await _onboard(send_message, send_callback)
+    debt = await debts_repo.create_debt(session, 1, "Кредит", DebtType.REGULAR.value)
+    debt_id = debt.id
+    for due_date in debts_repo.monthly_dates(
+        debts_repo.next_payment_date(5, TODAY), 12
+    ):
+        await debts_repo.add_payment(session, debt_id, 46000, due_date)
+
+    await send_message("/debts")
     await send_callback("debts:edit")
-    await send_callback(f"debt_edit:{debt.id}")
-    await send_callback("debt_field:payment_day")
-    replies = await send_message("5")
-    assert "Долг обновлён: Автокредит — 46 000 ₽, 5 числа" in replies[0]
+    await send_callback(f"debt_edit:{debt_id}")
+    replies = await send_callback(f"debt_eschedule:{debt_id}")
+    assert "число месяца" in replies[0]
+    await send_message("20")
+    replies = await send_message("50000")
+    assert "обновлён" in replies[0]
 
     session.expire_all()
-    stored = (await debts_repo.get_debts(session, 1))[0]
-    assert stored.payment_day == 5
+    payments = await debts_repo.get_payments(session, debt_id)
+    assert all(payment.amount == 50000 for payment in payments)
+    assert {date.fromisoformat(payment.due_date).day for payment in payments} == {20}
 
 
-async def test_debts_edit_cancel(
+async def test_debts_edit_payment_amount(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback)
-    await _add_debt(send_message, send_callback, "Кредит", "46000", "25")
+    debt_id, payment_id = await _add_debt(
+        session, amount=46000, due_date=TODAY, debt_type=DebtType.ONE.value
+    )
 
-    replies = await send_callback("debt_edit:cancel")
-    assert "Отменено" in replies[0]
-    stored = (await debts_repo.get_debts(session, 1))[0]
-    assert stored.amount == 46000
+    await send_message("/debts")
+    await send_callback("debts:edit")
+    await send_callback(f"debt_edit:{debt_id}")
+    replies = await send_callback(f"debt_pedit:{payment_id}")
+    assert "Что изменить?" in replies[0]
+    replies = await send_callback("debt_pfield:amount")
+    assert "Новая сумма" in replies[0]
+    replies = await send_message("50000")
+    assert "Платёж обновлён" in replies[0]
+
+    session.expire_all()
+    payment = await debts_repo.get_payment(session, payment_id)
+    assert payment is not None
+    assert payment.amount == 50000
+
+
+async def test_debts_payment_menu_has_no_delete(
+    send_message: Send, send_callback: Press, session: AsyncSession, bot: object
+) -> None:
+    """В меню платежа нет удаления — только сумма и дата."""
+    await _onboard(send_message, send_callback)
+    debt_id, payment_id = await _add_debt(
+        session, debt_type=DebtType.ONE.value, due_date=TODAY
+    )
+
+    await send_message("/debts")
+    await send_callback("debts:edit")
+    await send_callback(f"debt_edit:{debt_id}")
+    await send_callback(f"debt_pedit:{payment_id}")
+
+    labels = _button_labels(bot)
+    assert "Сумма" in labels
+    assert "Дата" in labels
+    assert "🗑 Удалить платёж" not in labels

@@ -57,12 +57,10 @@ async def build_forecast_text(
     income = income_until_month_end(user, today)
 
     month_end = end_of_month(today)
-    days_to_month_end = (month_end - today).days
-    debts_total = 0
-    for debt in await debts_repo.get_debts(session, user.telegram_id):
-        debts_total += debt.amount * len(
-            debts_repo.payments_within(debt.payment_day, today, days_to_month_end)
-        )
+    pending = await debts_repo.get_pending_payments(
+        session, user.telegram_id, today, month_end
+    )
+    debts_total = sum(payment.amount for payment, _ in pending)
 
     goals = await goals_repo.get_goals(session, user.telegram_id)
     allocated = await allocations_repo.get_allocations_by_user(

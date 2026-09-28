@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,15 @@ Press = Callable[..., Awaitable[list[str]]]
 
 TODAY = datetime.now(UTC).date()
 TODAY_DAY = TODAY.day
+
+
+async def _add_debt(
+    session: AsyncSession, owner: int, name: str, amount: int, day: int
+) -> None:
+    debt = await debts_repo.create_debt(session, owner, name)
+    await debts_repo.add_payment(
+        session, debt.id, amount, date(TODAY.year, TODAY.month, day)
+    )
 
 
 async def _onboard(
@@ -54,11 +63,11 @@ async def test_family_overall_shows_verdicts(
     await _family(send_message, send_callback, session)
     await _set_card(session, 1, 50000)
     await _set_card(session, 2, 30000)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, TODAY_DAY)
-    await debts_repo.add_debt(session, 2, "Ипотека", "mortgage", 61000, TODAY_DAY)
+    await _add_debt(session, 1, "Кредит", 46000, TODAY_DAY)
+    await _add_debt(session, 2, "Ипотека", 61000, TODAY_DAY)
 
     text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
-    assert "*Платежи до конца месяца:*" in text
+    assert "*Предстоящие:*" in text
     assert "— Кредит (Илья): 46 000 ₽" in text
     assert "Свободно у Ильи: 50 000 ₽ — хватает ✅" in text
     assert "— Ипотека (Жена): 61 000 ₽" in text
@@ -74,8 +83,8 @@ async def test_family_member_view_only_own_payments(
     await _family(send_message, send_callback, session)
     await _set_card(session, 1, 50000)
     await _set_card(session, 2, 30000)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, TODAY_DAY)
-    await debts_repo.add_debt(session, 2, "Ипотека", "mortgage", 61000, TODAY_DAY)
+    await _add_debt(session, 1, "Кредит", 46000, TODAY_DAY)
+    await _add_debt(session, 2, "Ипотека", 61000, TODAY_DAY)
 
     await send_message("/stats", user_id=1, first_name="Илья")
     await send_callback("stats_user_2", user_id=1, first_name="Илья")
@@ -92,17 +101,17 @@ async def test_no_payments_hides_block(
 ) -> None:
     await _onboard(send_message, send_callback, user_id=1, first_name="Илья")
     text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
-    assert "*Платежи до конца месяца:*" not in text
+    assert "*Предстоящие:*" not in text
 
 
 async def test_solo_verdict_short(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
     await _onboard(send_message, send_callback, user_id=1, first_name="Илья")
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, TODAY_DAY)
+    await _add_debt(session, 1, "Кредит", 46000, TODAY_DAY)
 
     text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
-    assert "*Платежи до конца месяца:*" in text
+    assert "*Предстоящие:*" in text
     assert "— Кредит: 46 000 ₽" in text
     assert "Свободно: 12 000 ₽ — не хватает ❌ (нужно ещё 34 000 ₽)" in text
 
@@ -112,7 +121,7 @@ async def test_solo_verdict_enough(
 ) -> None:
     await _onboard(send_message, send_callback, user_id=1, first_name="Илья")
     await _set_card(session, 1, 50000)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, TODAY_DAY)
+    await _add_debt(session, 1, "Кредит", 46000, TODAY_DAY)
 
     text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
     assert "Свободно: 50 000 ₽ — хватает ✅" in text
@@ -123,7 +132,7 @@ async def test_solo_verdict_negative_balance(
 ) -> None:
     await _onboard(send_message, send_callback, user_id=1, first_name="Илья")
     await _set_card(session, 1, -5000)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, TODAY_DAY)
+    await _add_debt(session, 1, "Кредит", 46000, TODAY_DAY)
 
     text = (await send_message("/stats", user_id=1, first_name="Илья"))[0]
     assert (

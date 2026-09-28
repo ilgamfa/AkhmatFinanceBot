@@ -13,10 +13,11 @@ from models.base import (
     CategoryType,
     DebtType,
     IncomeType,
+    PaymentStatus,
     TransactionType,
 )
 from models.category import Category
-from models.debt import Debt
+from models.debt import Debt, DebtPayment
 from models.family import Family, FamilyMember
 from models.goal import Goal
 from models.transaction import Transaction
@@ -33,11 +34,13 @@ __all__ = [
     "Category",
     "CategoryType",
     "Debt",
+    "DebtPayment",
     "DebtType",
     "Family",
     "FamilyMember",
     "Goal",
     "IncomeType",
+    "PaymentStatus",
     "Transaction",
     "TransactionType",
     "User",

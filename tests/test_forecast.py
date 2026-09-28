@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import date
+from datetime import UTC, date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,12 +16,19 @@ from services import (
     goals_repo,
     users_repo,
 )
-from services.calculations import dump_income_dates
+from services.calculations import dump_income_dates, end_of_month
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
 
 FIXED_TODAY = date(2026, 9, 20)
+
+
+async def _add_debt(
+    session: AsyncSession, telegram_id: int, amount: int, due_date: date
+) -> None:
+    debt = await debts_repo.create_debt(session, telegram_id, "Кредит")
+    await debts_repo.add_payment(session, debt.id, amount, due_date)
 
 
 async def _profile_user(session: AsyncSession, user_id: int = 1) -> User:
@@ -43,7 +50,7 @@ async def test_forecast_calculates_exact(session: AsyncSession) -> None:
     Прогресс цели берётся из связей копилки.
     """
     user = await _profile_user(session)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+    await _add_debt(session, 1, 46000, date(2026, 9, 25))
     savings = await accounts_repo.ensure_account(session, 1, "savings")
     await accounts_repo.correct_balance(session, savings.id, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, "2027-12-25", 1)
@@ -62,7 +69,7 @@ async def test_forecast_calculates_exact(session: AsyncSession) -> None:
 async def test_forecast_goal_without_deadline_excluded(session: AsyncSession) -> None:
     """Цели без срока не добавляют «нужно в месяц» в прогноз."""
     user = await _profile_user(session)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+    await _add_debt(session, 1, 46000, date(2026, 9, 25))
     savings = await accounts_repo.ensure_account(session, 1, "savings")
     await accounts_repo.correct_balance(session, savings.id, 50000)
     goal = await goals_repo.add_goal(session, 1, "Машина", 1500000, None, 1)
@@ -76,7 +83,7 @@ async def test_forecast_goal_without_deadline_excluded(session: AsyncSession) ->
 async def test_forecast_positive_no_warning(session: AsyncSession) -> None:
     """Без целей прогноз положительный — предупреждения нет."""
     user = await _profile_user(session)
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 46000, 25)
+    await _add_debt(session, 1, 46000, date(2026, 9, 25))
 
     text = await build_forecast_text(session, user, today=FIXED_TODAY)
     assert "Свободно после всего: 16 000 ₽" in text
@@ -93,7 +100,9 @@ async def test_forecast_minus_warns_via_command(
     await send_callback("onboarding:income_fixed")
     await send_callback("onboarding:times_1")
     await send_message("10, 50000")
-    await debts_repo.add_debt(session, 1, "Кредит", "loan", 999999, 25)
+    await _add_debt(
+        session, 1, 999999, end_of_month(datetime.now(UTC).date())
+    )
 
     text = (await send_message("/forecast"))[0]
     assert "Свободно после всего: −" in text
