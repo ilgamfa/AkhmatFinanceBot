@@ -17,6 +17,7 @@ from handlers import (
     forecast,
     goals,
     onboarding,
+    reminders,
     savings,
     start,
     stats,
@@ -24,6 +25,7 @@ from handlers import (
 )
 from handlers.middlewares import DbSessionMiddleware
 from models.database import Database, build_sqlite_url
+from scheduler import build_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ def create_dispatcher(database: Database) -> Dispatcher:
         categories.build_router(),
         forecast.build_router(),
         stats.build_router(),
+        reminders.build_router(),
         onboarding.build_router(),
     )
     return dp
@@ -55,9 +58,12 @@ async def main() -> None:
     await database.init()
     bot = Bot(token=BOT_TOKEN)
     dp = create_dispatcher(database)
+    scheduler = build_scheduler(database, bot)
+    scheduler.start()
     try:
         await dp.start_polling(bot)
     finally:
+        scheduler.shutdown(wait=False)
         await bot.session.close()
         await database.dispose()
 

@@ -19,6 +19,8 @@ Telegram-бот «Карманный финсоветник» для плани�
 - Конфиг: python-dotenv (`.env`)
 - Parse mode: legacy Markdown (только там, где нужно)
 - Хостинг: VPS в РФ
+- APScheduler для планирования напоминаний.
+- Часовой пояс: Europe/Moscow.
 - LLM для советов: API (Фаза 9)
 - Тесты: pytest + pytest-asyncio, БД для тестов — in-memory SQLite
 - Линтер: ruff
@@ -47,6 +49,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 ├── .env                  # секреты (не коммитить)
 ├── .env.example          # шаблон переменных окружения
 ├── bot.py                # точка входа
+├── scheduler.py          # APScheduler (напоминания, Фаза 8)
 ├── config.py             # токены, настройки
 ├── models/               # ORM-модели и подключение к БД
 ├── handlers/             # обработчики команд (роутеры)
@@ -78,6 +81,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 ### Актуальные таблицы (10)
 
 **`users`** — `id`, `telegram_id` (BigInteger, unique, index), `advice_style` (String(16), default `"soft"`), `onboarding_completed` (Boolean, default `False`), `income_type` (String(16), nullable), `income_dates` (Text, JSON), `income` (Integer, nullable), `created_at` (DateTime tz).
+Поля напоминаний: `reminder_evening_enabled` (Boolean, default `True`), `reminder_evening_time` (String(5), default `"21:00"`), `reminder_payment_enabled` (Boolean, default `True`), `reminder_payment_time` (String(5), default `"10:00"`), `reminder_payment_days_before` (Integer, default `1`), `reminder_evening_last_sent` (Date, nullable), `reminder_payment_last_sent` (Date, nullable).
 **Поля `free_money` нет** — баланс в `accounts.balance` для `type="card"`.
 
 **`transactions`** — `id`, `telegram_id` (BigInteger, index), `account_id` (Integer, index, nullable), `category_id` (Integer, nullable, index), `type` (String(16), `expense`/`income`/`correction`/`savings_add`), `amount` (Integer), `created_at` (String(40), ISO).
@@ -108,6 +112,7 @@ python -m py_compile bot.py     # проверка синтаксиса
 - `services/allocations_repo.py` — `allocate`, `unallocate`, `get_allocations_by_goal`, `get_allocations_by_user`.
 - `services/family_repo.py` — `create_family`, `join_family`, `get_family`, `get_family_members`.
 - `services/categories_repo.py` — `get_categories`, `add_category`, `get_default_categories`.
+- `services/reminders_repo.py` — `get_reminder_settings`, `update_reminder_settings`, `get_users_for_evening_reminder`, `get_users_for_payment_reminder`.
 
 ## Логика расчётов
 
@@ -124,6 +129,10 @@ python -m py_compile bot.py     # проверка синтаксиса
 - **Категории** (Фаза 6): при `/minus` и `/plus` без категории — показать кнопки. При выборе — сохранить `category_id`. Кнопка `[➕ Своя]` — ForceReply + `add_category`. Кнопка `[❌ Без категории]` — сохранить без `category_id`. Топ-3 категорий за месяц в `/stats`.
 - **Долги** (Фаза 7): единая схема `debts` + `debt_payments`, тип в `debts.type` (`regular`/`short`/`one`). Регулярный: число месяца, 12 платежей по умолчанию. Краткосрочный: N платежей (N ≥ 1). Разовый: 1 платёж. Список `/debts` — по типу: «46 000 ₽/мес, 25 числа», «3 платежа, следующий 05.10», «44 000 ₽, 07.10.2026». В /stats: «Предстоящие» — pending-платежи (регулярные/краткосрочные до конца месяца, разовые на любую будущую дату) с вердиктом; «Выплачено» — прошедшие по дате платежи текущего месяца + разовые в прошлом (статус не учитывается). Без кнопок действий. Удаление долга = завершение.
 - **Счета создаёт онбординг.** При вступлении в семью счета заранее не создаются: счета нового участника создаёт онбординг сразу с балансом карты и `family_id`; уже прошедшему онбординг при вступлении проставляется `family_id` у существующих счетов.
+- **Напоминания** (Фаза 8): APScheduler, часовой пояс Europe/Moscow; задачи раз в минуту.
+  - Вечернее: раз в день в `reminder_evening_time`, если сегодня (MSK) не было transactions.
+  - Платёж: раз в день в `reminder_payment_time`, за `reminder_payment_days_before` дней до `due_date`.
+  - Повтор в один день исключается полями `reminder_*_last_sent` (дата MSK).
 - Если покупка ломает план — предупредить, но не запрещать.
 
 ## Скиллы
@@ -155,9 +164,8 @@ python -m py_compile bot.py     # проверка синтаксиса
 | 5.1 | Фиксы Фазы 5 | ✅ (см. CHANGELOG.md) |
 | 6 | Категории | ✅ (см. CHANGELOG.md) |
 | 7 | Фикс беты — долги | ✅ (см. CHANGELOG.md) |
-| 8 | напоминания | ⏳ |
-| 9 | LLM-советник, экспорт | ⏳ |
->>>>>>> 4397f5d1471333d8d0583191c33931054a8011fd
+| 8 | Напоминания (вечернее + платежи) | ✅ (см. CHANGELOG.md) |
+| 9 | /can, советы, LLM-советник, экспорт | ⏳ |
 
 ## Что НЕ делать (глобально)
 

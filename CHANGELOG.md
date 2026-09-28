@@ -2,6 +2,18 @@
 
 История выполненного. PRD.md и AGENTS.md описывают только актуальное состояние и то, что ещё не сделано.
 
+## Фаза 8 — Напоминания (вечернее + платежи)
+
+### 2026-09-28
+- ✅ Схема: поля в `users` — `reminder_evening_enabled`, `reminder_evening_time`, `reminder_payment_enabled`, `reminder_payment_time`, `reminder_payment_days_before`, а также `reminder_evening_last_sent`/`reminder_payment_last_sent` (дата MSK, защита от дублей).
+- ✅ `services/reminders_repo.py`: `get_reminder_settings`, `update_reminder_settings` (валидация `HH:MM` и 0–30 дней), `get_users_for_evening_reminder`, `get_users_for_payment_reminder`, `mark_evening_sent`, `mark_payment_sent`.
+- ✅ `services/reminder_service.py`: проверка записей за сутки по Europe/Moscow, выборка pending-платежей через N дней, тексты вечернего и платёжного напоминания с вердиктом «хватает / не хватает».
+- ✅ `scheduler.py`: APScheduler с часовым поясом Europe/Moscow, задачи раз в минуту, отправка один раз в день, изоляция ошибок по получателю; запуск и остановка в `bot.py`.
+- ✅ `/reminders`: показ настроек, изменение времени вечернего/платёжного напоминания и числа дней, включение/выключение.
+- ✅ Онбординг: после основного флоу предложение напоминаний с `[✅ Включить всё]` `[⚙️ Настроить]`.
+- ✅ Зависимость `apscheduler>=3.10,<4` (APScheduler 3.x).
+- ✅ dev-БД `finance.db` пересоздана (схема `users` изменена).
+
 ## Фаза 7 — Фикс беты: долги
 
 ### 2026-09-22

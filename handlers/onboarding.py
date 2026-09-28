@@ -14,6 +14,8 @@ from aiogram.types import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from handlers.reminders import OFFER_TEXT as REMINDER_OFFER_TEXT
+from handlers.reminders import build_offer_keyboard
 from models import IncomeType
 from services import accounts_repo, users_repo
 from services.calculations import dump_income_dates
@@ -283,6 +285,9 @@ async def _finish(
     )
     await state.clear()
     await message.answer(FINISH_TEXT)
+    await message.answer(
+        REMINDER_OFFER_TEXT, reply_markup=build_offer_keyboard()
+    )
 
 
 def build_router() -> Router:
