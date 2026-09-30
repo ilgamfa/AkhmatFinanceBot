@@ -170,13 +170,15 @@ async def delete_category(
     return True
 
 
-async def get_top_expense_categories(
+async def get_expense_categories_since(
     session: AsyncSession,
     telegram_id: int,
     since_iso: str,
-    limit: int = 3,
 ) -> list[tuple[str, int]]:
-    """Топ категорий трат за период: [(название, сумма), ...] по убыванию."""
+    """Суммы трат по категориям за период: [(название, сумма), ...] по убыванию.
+
+    Учитываются только операции с категорией (``category_id IS NOT NULL``).
+    """
     total = func.coalesce(func.sum(Transaction.amount), 0)
     result = await session.execute(
         select(Category.name, total)
@@ -188,6 +190,16 @@ async def get_top_expense_categories(
         )
         .group_by(Category.id)
         .order_by(total.desc(), Category.id)
-        .limit(limit)
     )
     return [(name, int(amount)) for name, amount in result.all()]
+
+
+async def get_top_expense_categories(
+    session: AsyncSession,
+    telegram_id: int,
+    since_iso: str,
+    limit: int = 3,
+) -> list[tuple[str, int]]:
+    """Топ категорий трат за период: [(название, сумма), ...] по убыванию."""
+    rows = await get_expense_categories_since(session, telegram_id, since_iso)
+    return rows[:limit]
