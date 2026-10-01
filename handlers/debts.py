@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Debt, DebtPayment
 from models.base import DebtType, PaymentStatus
-from services import debts_repo
+from services import debts_repo, debts_service
+from services.calculations import moscow_today
 from utils.money import format_amount, parse_amount
 
 NO_DEBTS_TEXT = "У тебя пока нет долгов"
@@ -108,7 +109,7 @@ def parse_date(text: str | None, today: date | None = None) -> date | None:
         except ValueError:
             continue
         if "%Y" not in fmt and "%y" not in fmt:
-            parsed = parsed.replace(year=(today or datetime.now(UTC).date()).year)
+            parsed = parsed.replace(year=(today or moscow_today()).year)
         return parsed
     return None
 
@@ -299,15 +300,12 @@ def _debt_line(index: int, debt: Debt, payments: list[DebtPayment]) -> str:
     )
 
 
-async def _debt_summary_lines(
-    session: AsyncSession, debts: list[Debt]
-) -> list[str]:
+def _debt_lines(visible: list[tuple[Debt, list[DebtPayment]]]) -> list[str]:
     """Строки списка долгов (без итоговой строки)."""
-    lines: list[str] = []
-    for index, debt in enumerate(debts, start=1):
-        payments = await debts_repo.get_payments(session, debt.id)
-        lines.append(_debt_line(index, debt, payments))
-    return lines
+    return [
+        _debt_line(index, debt, payments)
+        for index, (debt, payments) in enumerate(visible, start=1)
+    ]
 
 
 async def _show_debt_detail(
@@ -337,14 +335,18 @@ async def cmd_debts(message: Message, session: AsyncSession) -> None:
     if message.from_user is None:
         return
 
-    debts = await debts_repo.get_debts(session, message.from_user.id)
-    if not debts:
+    today = moscow_today()
+    await debts_service.normalize_debts(session, message.from_user.id, today)
+    visible = await debts_service.list_visible_debts(
+        session, message.from_user.id, today
+    )
+    if not visible:
         await message.answer(
             NO_DEBTS_TEXT, reply_markup=_manage_keyboard(has_debts=False)
         )
         return
     lines = ["Твои долги:", ""]
-    lines.extend(await _debt_summary_lines(session, debts))
+    lines.extend(_debt_lines(visible))
     await message.answer(
         "\n".join(lines), reply_markup=_manage_keyboard(has_debts=True)
     )
@@ -432,7 +434,7 @@ async def process_day(
         data["name"],
         DebtType.REGULAR.value,
     )
-    first = debts_repo.next_payment_date(int(cleaned), datetime.now(UTC).date())
+    first = debts_repo.next_payment_date(int(cleaned), moscow_today())
     for due_date in debts_repo.monthly_dates(first, REGULAR_MONTHS):
         await debts_repo.add_payment(session, debt.id, data["amount"], due_date)
     await message.answer(ADDED_TEXT)
@@ -547,12 +549,17 @@ async def on_delete_list_pressed(
     await callback.answer()
     if callback.from_user is None or not isinstance(callback.message, Message):
         return
-    debts = await debts_repo.get_debts(session, callback.from_user.id)
-    if not debts:
+    today = moscow_today()
+    await debts_service.normalize_debts(session, callback.from_user.id, today)
+    visible = await debts_service.list_visible_debts(
+        session, callback.from_user.id, today
+    )
+    if not visible:
         await callback.message.answer(NO_DEBTS_TEXT)
         return
     await callback.message.answer(
-        DELETE_LIST_TITLE, reply_markup=_debt_list_keyboard(debts, "debt_del")
+        DELETE_LIST_TITLE,
+        reply_markup=_debt_list_keyboard([debt for debt, _ in visible], "debt_del"),
     )
 
 
@@ -586,12 +593,17 @@ async def on_edit_list_pressed(
     await callback.answer()
     if callback.from_user is None or not isinstance(callback.message, Message):
         return
-    debts = await debts_repo.get_debts(session, callback.from_user.id)
-    if not debts:
+    today = moscow_today()
+    await debts_service.normalize_debts(session, callback.from_user.id, today)
+    visible = await debts_service.list_visible_debts(
+        session, callback.from_user.id, today
+    )
+    if not visible:
         await callback.message.answer(NO_DEBTS_TEXT)
         return
     await callback.message.answer(
-        EDIT_LIST_TITLE, reply_markup=_debt_list_keyboard(debts, "debt_edit")
+        EDIT_LIST_TITLE,
+        reply_markup=_debt_list_keyboard([debt for debt, _ in visible], "debt_edit"),
     )
 
 

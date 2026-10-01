@@ -8,14 +8,20 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from models.database import Database
-from services import accounts_repo, reminder_service, reminders_repo
+from services import (
+    debts_repo,
+    debts_service,
+    reminder_service,
+    reminders_repo,
+    verdicts_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +87,11 @@ async def evening_job(
 async def payment_job(
     database: Database, bot: Bot, now: datetime | None = None
 ) -> None:
-    """Напоминание о платежах, срок которых наступит через N дней."""
+    """Напоминание о платежах, срок которых наступит через N дней.
+
+    Вердикт считается сквозным: за окно до даты платежа учитываются доход
+    владельца и более ранние платежи — так же, как в ``/stats``.
+    """
     moment = reminder_service.now_moscow(now)
     today = moment.date()
     current = moment.strftime("%H:%M")
@@ -93,19 +103,34 @@ async def payment_job(
                 continue
             if user.reminder_payment_last_sent == today:
                 continue
-            pairs = await reminder_service.get_upcoming_payments(
-                session,
-                user.telegram_id,
-                user.reminder_payment_days_before,
-                today,
+            await debts_service.normalize_debts(session, user.telegram_id, today)
+            target = today + timedelta(days=user.reminder_payment_days_before)
+            pairs = await debts_repo.get_pending_payments(
+                session, user.telegram_id, today, target
             )
-            if not pairs:
+            payments = [
+                (
+                    date.fromisoformat(payment.due_date),
+                    payment.amount,
+                    debt.name,
+                    user.telegram_id,
+                    "",
+                )
+                for payment, debt in pairs
+            ]
+            groups = await verdicts_service.build_verdicts(
+                session, payments, today
+            )
+            verdicts = [
+                verdict
+                for group in groups
+                for verdict in group
+                if verdict.payment_date == target
+            ]
+            if not verdicts:
                 continue
-            free = await accounts_repo.get_balance(
-                session, user.telegram_id, "card"
-            )
             text = reminder_service.compose_payment_text(
-                user.reminder_payment_days_before, free, pairs
+                user.reminder_payment_days_before, verdicts
             )
             await _send(bot, user.telegram_id, text)
             await reminders_repo.mark_payment_sent(session, user, today)

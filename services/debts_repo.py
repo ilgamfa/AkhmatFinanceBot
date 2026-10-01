@@ -194,6 +194,62 @@ async def mark_paid(session: AsyncSession, payment_id: int) -> DebtPayment | Non
     return payment
 
 
+# --- обслуживание графика (Фаза 9.1) -----------------------------------------
+
+# Сколько платежей создаётся для регулярного долга за раз.
+REGULAR_MONTHS = 12
+
+
+async def close_overdue_payments(
+    session: AsyncSession, telegram_id: int, today: date
+) -> int:
+    """Помечает прошедшие по дате платежи оплаченными (``paid_at`` — дата).
+
+    Считается, что платёж со сроком раньше ``today`` уже выплачен. Реальная
+    дата оплаты неизвестна, поэтому ``paid_at`` = дата платежа. Возвращает
+    число изменённых платежей. Идемпотентно.
+    """
+    debt_ids = select(Debt.id).where(Debt.telegram_id == telegram_id)
+    result = await session.execute(
+        update(DebtPayment)
+        .where(
+            DebtPayment.debt_id.in_(debt_ids),
+            DebtPayment.status == PaymentStatus.PENDING.value,
+            DebtPayment.due_date < today.isoformat(),
+        )
+        .values(status=PaymentStatus.PAID.value, paid_at=DebtPayment.due_date)
+    )
+    await session.commit()
+    return result.rowcount or 0
+
+
+async def extend_finished_regular(
+    session: AsyncSession, telegram_id: int, today: date
+) -> int:
+    """Достраивает следующие 12 платежей у регулярных долгов без pending.
+
+    Регулярный долг живёт, пока пользователь его не удалит. Когда все его
+    платежи стали оплаченными, генерируется новый год платежей от ближайшего
+    числа месяца. Возвращает число продлённых долгов.
+    """
+    extended = 0
+    for debt in await get_debts(session, telegram_id):
+        if debt.type != DebtType.REGULAR.value:
+            continue
+        payments = await get_payments(session, debt.id)
+        if not payments:
+            continue
+        if any(payment.status == PaymentStatus.PENDING.value for payment in payments):
+            continue
+        last = payments[-1]
+        day = date.fromisoformat(last.due_date).day
+        first = next_payment_date(day, today)
+        for due_date in monthly_dates(first, REGULAR_MONTHS):
+            await add_payment(session, debt.id, last.amount, due_date)
+        extended += 1
+    return extended
+
+
 # --- выборки для /stats и /forecast ------------------------------------------
 
 

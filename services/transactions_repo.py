@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Transaction
 from models.base import TransactionType
+from services.calculations import day_bounds_utc
 
 VALID_PERIODS = ("today", "week", "month")
 
@@ -51,6 +52,24 @@ async def set_category(
         .values(category_id=category_id)
     )
     await session.commit()
+
+
+async def has_income_today(
+    session: AsyncSession, telegram_id: int, today: date
+) -> bool:
+    """Была ли у пользователя операция дохода за сутки ``today`` (MSK)."""
+    start_iso, end_iso = day_bounds_utc(today)
+    result = await session.execute(
+        select(Transaction.id)
+        .where(
+            Transaction.telegram_id == telegram_id,
+            Transaction.type == TransactionType.INCOME.value,
+            Transaction.created_at >= start_iso,
+            Transaction.created_at < end_iso,
+        )
+        .limit(1)
+    )
+    return result.first() is not None
 
 
 async def get_last_transactions(

@@ -7,14 +7,18 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from handlers.stats import genitive_name
+from handlers.stats import genitive_name, render_month_payments
 from services import accounts_repo, debts_repo, family_repo
+from services.stats_service import PaymentVerdict
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
 
 TODAY = datetime.now(UTC).date()
 TODAY_DAY = TODAY.day
+# День дохода, гарантированно не совпадающий с сегодняшним: иначе зарплата
+# попала бы в окно платежа «сегодня» и сломала бы вердикт.
+INCOME_DAY = (TODAY_DAY % 28) + 1
 
 
 async def _add_debt(
@@ -38,7 +42,7 @@ async def _onboard(
     await send_callback(
         "onboarding:times_1", user_id=user_id, first_name=first_name
     )
-    await send_message("10, 50000", user_id=user_id, first_name=first_name)
+    await send_message(f"{INCOME_DAY}, 50000", user_id=user_id, first_name=first_name)
 
 
 async def _set_card(
@@ -148,3 +152,35 @@ def test_genitive_name() -> None:
     assert genitive_name("Андрей") == "Андрея"
     assert genitive_name("Игорь") == "Игоря"
     assert genitive_name("") == ""
+
+
+def _verdict(*, amount: int, free: int, income: int) -> PaymentVerdict:
+    return PaymentVerdict(
+        payment_date=date(2026, 10, 7),
+        debt_name="Кредит",
+        amount=amount,
+        owner_name="",
+        free=free,
+        shortfall=max(0, amount - free),
+        income=income,
+        income_events=((date(2026, 10, 5), income),) if income else (),
+    )
+
+
+def test_render_month_payments_shows_income_source() -> None:
+    """Если без дохода не хватало — показывается строка-источник."""
+    verdict = _verdict(amount=46000, free=62000, income=50000)
+    lines = render_month_payments(
+        [[verdict]], "*Предстоящие:*", show_owner=False
+    )
+    assert "  + 05.10: 50 000 ₽" in lines
+    assert "  Свободно: 62 000 ₽ — хватает ✅" in lines
+
+
+def test_render_month_payments_hides_income_when_redundant() -> None:
+    """Если платежа хватало и без дохода — строка не показывается."""
+    verdict = _verdict(amount=1000, free=62000, income=50000)
+    lines = render_month_payments(
+        [[verdict]], "*Предстоящие:*", show_owner=False
+    )
+    assert not any(line.startswith("  + ") for line in lines)

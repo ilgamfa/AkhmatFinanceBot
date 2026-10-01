@@ -3,23 +3,30 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.base import DebtType, PaymentStatus
-from services import debts_repo
+from services import accounts_repo, debts_repo, transactions_repo, users_repo
+from services.calculations import dump_income_dates, moscow_today
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
 
-TODAY = datetime.now(UTC).date()
+TODAY = moscow_today()
 PAST_THIS_MONTH = TODAY - timedelta(days=1)
 FUTURE = TODAY + timedelta(days=40)
 PAST = TODAY - timedelta(days=40)
+# День дохода, гарантированно не совпадающий с сегодняшним.
+INCOME_DAY = (TODAY.day % 28) + 1
 ADDED_TEXT = "Долг добавлен. Удалить можно в /debts."
+NEEDS_PAST_IN_MONTH = pytest.mark.skipif(
+    PAST_THIS_MONTH.month != TODAY.month,
+    reason="1-е число месяца: прошлых дней в текущем месяце нет",
+)
 
 
 def _button_labels(bot: object) -> list[str]:
@@ -36,7 +43,7 @@ async def _onboard(send_message: Send, send_callback: Press) -> None:
     await send_message("12000")
     await send_callback("onboarding:income_fixed")
     await send_callback("onboarding:times_1")
-    await send_message("10, 50000")
+    await send_message(f"{INCOME_DAY}, 50000")
 
 
 async def _add_debt(
@@ -88,6 +95,7 @@ async def test_get_debts_and_payments(session: AsyncSession) -> None:
     assert [payment.amount for payment in payments] == [1000, 2000]
 
 
+@NEEDS_PAST_IN_MONTH
 async def test_get_pending_and_paid_queries(session: AsyncSession) -> None:
     _, pending_id = await _add_debt(session, name="Кредит", due_date=TODAY)
     _, past_id = await _add_debt(session, name="Ипотека", due_date=PAST_THIS_MONTH)
@@ -243,10 +251,7 @@ async def test_stats_shows_upcoming(
     assert "Свободно: 12 000 ₽ — не хватает ❌ (нужно ещё 34 000 ₽)" in text
 
 
-@pytest.mark.skipif(
-    PAST_THIS_MONTH.month != TODAY.month,
-    reason="1-е число месяца: прошлых дней в текущем месяце нет",
-)
+@NEEDS_PAST_IN_MONTH
 async def test_stats_shows_paid(
     send_message: Send, send_callback: Press, session: AsyncSession
 ) -> None:
@@ -323,19 +328,25 @@ async def test_debts_list_format(
     ):
         await debts_repo.add_payment(session, regular.id, 46000, due_date)
     # краткосрочный — «N платежа, следующий дата»
+    short_first = TODAY + timedelta(days=5)
     short = await debts_repo.create_debt(session, 1, "Кредитка", DebtType.SHORT.value)
-    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 10, 5))
-    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 11, 5))
-    await debts_repo.add_payment(session, short.id, 10000, date(TODAY.year, 12, 5))
+    for offset in (0, 30, 60):
+        await debts_repo.add_payment(
+            session, short.id, 10000, short_first + timedelta(days=offset)
+        )
     # разовый — «сумма, дата»
+    one_date = TODAY + timedelta(days=7)
     one = await debts_repo.create_debt(session, 1, "Друг", DebtType.ONE.value)
-    await debts_repo.add_payment(session, one.id, 44000, date(TODAY.year, 10, 7))
+    await debts_repo.add_payment(session, one.id, 44000, one_date)
 
     text = (await send_message("/debts"))[0]
     assert "Твои долги:" in text
     assert "1. Кредит — 46 000 ₽/мес, 25 числа" in text
-    assert "2. Кредитка — 3 платежа, следующий 05.10" in text
-    assert "3. Друг — 44 000 ₽, 07.10" in text
+    assert (
+        f"2. Кредитка — 3 платежа, следующий {short_first.strftime('%d.%m')}"
+        in text
+    )
+    assert f"3. Друг — 44 000 ₽, {one_date.strftime('%d.%m')}" in text
     assert "Неоплаченных платежей" not in text
     labels = _button_labels(bot)
     assert "✏️ Редактировать" in labels
@@ -446,3 +457,160 @@ async def test_debts_payment_menu_has_no_delete(
     assert "Сумма" in labels
     assert "Дата" in labels
     assert "🗑 Удалить платёж" not in labels
+
+
+# --- 11. авто-оплата и границы долгов ----------------------------------------
+
+
+async def test_close_overdue_marks_paid(session: AsyncSession) -> None:
+    """Прошедший по дате платёж помечается оплаченным, paid_at = дата платежа."""
+    _, payment_id = await _add_debt(session, due_date=PAST_THIS_MONTH)
+
+    assert await debts_repo.close_overdue_payments(session, 1, TODAY) == 1
+    payment = await debts_repo.get_payment(session, payment_id)
+    assert payment is not None
+    assert payment.status == PaymentStatus.PAID.value
+    assert payment.paid_at == PAST_THIS_MONTH.isoformat()
+    # повторный вызов ничего не меняет
+    assert await debts_repo.close_overdue_payments(session, 1, TODAY) == 0
+
+
+async def test_close_overdue_keeps_today_pending(session: AsyncSession) -> None:
+    """Платёж со сроком «сегодня» ещё не оплачен."""
+    _, payment_id = await _add_debt(session, due_date=TODAY)
+
+    assert await debts_repo.close_overdue_payments(session, 1, TODAY) == 0
+    payment = await debts_repo.get_payment(session, payment_id)
+    assert payment is not None
+    assert payment.status == PaymentStatus.PENDING.value
+
+
+async def test_extend_finished_regular_adds_next_year(session: AsyncSession) -> None:
+    """Регулярный долг без pending-платежей продлевается на 12 вперёд."""
+    debt = await debts_repo.create_debt(session, 1, "Кредит", DebtType.REGULAR.value)
+    for offset in (90, 60, 30):
+        await debts_repo.add_payment(
+            session, debt.id, 10000, TODAY - timedelta(days=offset)
+        )
+    await debts_repo.close_overdue_payments(session, 1, TODAY)
+
+    assert await debts_repo.extend_finished_regular(session, 1, TODAY) == 1
+
+    payments = await debts_repo.get_payments(session, debt.id)
+    pending = [
+        payment
+        for payment in payments
+        if payment.status == PaymentStatus.PENDING.value
+    ]
+    assert len(pending) == 12
+    assert all(payment.amount == 10000 for payment in pending)
+    assert all(date.fromisoformat(payment.due_date) >= TODAY for payment in pending)
+
+
+async def test_extend_skips_regular_with_pending(session: AsyncSession) -> None:
+    """Активный регулярный долг не продлевается."""
+    await _add_debt(session, due_date=FUTURE)
+
+    assert await debts_repo.extend_finished_regular(session, 1, TODAY) == 0
+
+
+async def test_debts_hides_finished_short(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Краткосрочный долг исчезает, когда все платежи прошли."""
+    await _onboard(send_message, send_callback)
+    debt = await debts_repo.create_debt(session, 1, "Рассрочка", DebtType.SHORT.value)
+    await debts_repo.add_payment(session, debt.id, 5000, PAST)
+
+    replies = await send_message("/debts")
+    assert "нет долгов" in replies[0]
+    # в БД долг остался
+    assert len(await debts_repo.get_debts(session, 1)) == 1
+
+
+async def test_debts_short_shows_next_future_date(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Прошедший платёж не показывается как «следующий»."""
+    await _onboard(send_message, send_callback)
+    debt = await debts_repo.create_debt(session, 1, "Кредитка", DebtType.SHORT.value)
+    await debts_repo.add_payment(session, debt.id, 10000, PAST_THIS_MONTH)
+    future = TODAY + timedelta(days=15)
+    await debts_repo.add_payment(session, debt.id, 10000, future)
+
+    text = (await send_message("/debts"))[0]
+    assert f"следующий {future.strftime('%d.%m')}" in text
+    assert PAST_THIS_MONTH.strftime("%d.%m") not in text
+
+
+async def test_debts_keeps_regular_and_extends(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Регулярный долг остаётся в списке и получает новые платежи."""
+    await _onboard(send_message, send_callback)
+    debt = await debts_repo.create_debt(session, 1, "Кредит", DebtType.REGULAR.value)
+    await debts_repo.add_payment(session, debt.id, 46000, PAST)
+
+    replies = await send_message("/debts")
+    assert "1. Кредит — 46 000 ₽/мес," in replies[0]
+
+    payments = await debts_repo.get_payments(session, debt.id)
+    assert any(
+        payment.status == PaymentStatus.PENDING.value for payment in payments
+    )
+
+
+async def test_stats_income_covers_future_payment(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Зарплата до даты платежа делает вердикт «хватает» и показывается строкой."""
+    await _onboard(send_message, send_callback)
+    user = await users_repo.get_by_telegram_id(session, 1)
+    assert user is not None
+    await users_repo.save_onboarding_profile(
+        session,
+        user,
+        income_type="fixed",
+        income_dates=dump_income_dates([(TODAY.day, 50000)]),
+    )
+    await _add_debt(
+        session,
+        name="Штраф",
+        amount=46000,
+        due_date=TODAY + timedelta(days=3),
+        debt_type=DebtType.ONE.value,
+    )
+
+    text = (await send_message("/stats"))[0]
+    assert f"  + {TODAY.strftime('%d.%m')}: 50 000 ₽" in text
+    assert "Свободно: 62 000 ₽ — хватает ✅" in text
+
+
+async def test_stats_income_today_skipped_when_recorded(
+    send_message: Send, send_callback: Press, session: AsyncSession
+) -> None:
+    """Если доход за сегодня уже записан, прогноз не задваивает его."""
+    await _onboard(send_message, send_callback)
+    user = await users_repo.get_by_telegram_id(session, 1)
+    assert user is not None
+    await users_repo.save_onboarding_profile(
+        session,
+        user,
+        income_type="fixed",
+        income_dates=dump_income_dates([(TODAY.day, 50000)]),
+    )
+    # зарплата уже зачислена: баланс 12000 + операция дохода
+    card = await accounts_repo.ensure_account(session, 1, "card")
+    await accounts_repo.correct_balance(session, card.id, 62000)
+    await transactions_repo.add_transaction(session, 1, "income", 50000, card.id)
+    await _add_debt(
+        session,
+        name="Штраф",
+        amount=46000,
+        due_date=TODAY + timedelta(days=3),
+        debt_type=DebtType.ONE.value,
+    )
+
+    text = (await send_message("/stats"))[0]
+    assert "Свободно: 62 000 ₽ — хватает ✅" in text
+    assert f"  + {TODAY.strftime('%d.%m')}: 50 000 ₽" not in text

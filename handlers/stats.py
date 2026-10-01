@@ -22,16 +22,20 @@ from services import (
     accounts_repo,
     categories_repo,
     debts_repo,
+    debts_service,
     family_repo,
     goals_repo,
+    income_repo,
     stats_service,
     transactions_repo,
     users_repo,
+    verdicts_service,
 )
 from services.calculations import (
     end_of_month,
     goal_emoji,
     goal_progress_percent,
+    moscow_today,
     parse_income_dates,
 )
 from utils.money import format_amount, format_rubles
@@ -219,6 +223,11 @@ def render_payment_list(
     return lines
 
 
+def format_income_source_line(income_date: date, amount: int) -> str:
+    """Строка учтённого дохода: «  + 05.10: 50 000 ₽»."""
+    return f"  + {income_date.strftime('%d.%m')}: {format_amount(amount)}"
+
+
 def format_verdict_line(
     free: int, shortfall: int, owner_name: str | None = None
 ) -> str:
@@ -238,7 +247,11 @@ def render_month_payments(
     *,
     show_owner: bool,
 ) -> list[str]:
-    """Строки блока платежей: заголовок и группы дней через пустую строку."""
+    """Строки блока платежей: заголовок и группы дней через пустую строку.
+
+    Доход показывается отдельной строкой, только если без него платежа не
+    хватило бы: иначе строка не объясняет вердикт и только шумит.
+    """
     lines = [header]
     for group in groups:
         lines.append("")
@@ -249,6 +262,10 @@ def render_month_payments(
                     verdict.payment_date, verdict.debt_name, verdict.amount, owner
                 )
             )
+            without_income = verdict.free - verdict.income
+            if verdict.income > 0 and verdict.amount > without_income:
+                for income_date, income_amount in verdict.income_events:
+                    lines.append(format_income_source_line(income_date, income_amount))
             lines.append(
                 format_verdict_line(verdict.free, verdict.shortfall, owner)
             )
@@ -266,12 +283,8 @@ async def _month_payment_groups(
     будущую дату.
     """
     month_end = end_of_month(today)
-    balances: dict[int, int] = {}
-    payments: list[tuple[date, int, str, int, str]] = []
+    payments: list[verdicts_service.Payment] = []
     for owner_id, owner_name in owners:
-        balances[owner_id] = await accounts_repo.get_balance(
-            session, owner_id, "card"
-        )
         pairs = await debts_repo.get_pending_payments(
             session, owner_id, today, FAR_FUTURE
         )
@@ -288,8 +301,7 @@ async def _month_payment_groups(
                     owner_name,
                 )
             )
-    payments.sort(key=lambda item: item[0])
-    return stats_service.build_payment_verdicts(payments, balances)
+    return await verdicts_service.build_verdicts(session, payments, today)
 
 
 async def _paid_rows(
@@ -336,14 +348,35 @@ async def _paid_rows(
     return rows
 
 
-async def _pending_until(
-    session: AsyncSession, telegram_id: int, today: date, until_date: date
+async def _projected_card(
+    session: AsyncSession,
+    user: User,
+    today: date,
+    horizon: date,
+    *,
+    include_horizon: bool,
 ) -> int:
-    """Сумма неоплаченных платежей от сегодня до ``until_date`` включительно."""
-    pairs = await debts_repo.get_pending_payments(
-        session, telegram_id, today, until_date
+    """Прогнозный баланс карты на окно ``today..horizon``.
+
+    Учитывает будущие поступления фиксированного дохода и pending-платежи.
+    При ``include_horizon=False`` события самого дня ``horizon`` не входят —
+    так считается «Свободно до ЗП» (сама зарплата ещё не пришла).
+    """
+    card = await accounts_repo.get_balance(session, user.telegram_id, "card")
+    events = await income_repo.get_income_events(session, user, today, horizon)
+    income_total = sum(
+        amount
+        for event_date, amount in events
+        if include_horizon or event_date < horizon
     )
-    return sum(payment.amount for payment, _ in pairs)
+    payments_total = sum(
+        payment.amount
+        for payment, _ in await debts_repo.get_pending_payments(
+            session, user.telegram_id, today, horizon
+        )
+        if include_horizon or date.fromisoformat(payment.due_date) < horizon
+    )
+    return card + income_total - payments_total
 
 
 def format_family_transaction_line(
@@ -382,7 +415,8 @@ async def _solo_screen(
     session: AsyncSession, user: User, today: date | None = None
 ) -> StatsScreen:
     """Собирает сводку для пользователя без семьи."""
-    today = today or datetime.now(UTC).date()
+    today = today or moscow_today()
+    await debts_service.normalize_debts(session, user.telegram_id, today)
     free_money = await accounts_repo.get_balance(session, user.telegram_id, "card")
     lines = [f"*Свободно:* {format_amount(free_money)}"]
 
@@ -403,26 +437,24 @@ async def _solo_screen(
     if paid:
         lines.extend(render_payment_list("*Выплачено:*", paid, PAID_SUFFIX))
 
-    debts = await debts_repo.get_debts(session, user.telegram_id)
-    if debts:
+    visible = await debts_service.list_visible_debts(
+        session, user.telegram_id, today
+    )
+    if visible:
         salary_date = next_salary_date(user, today)
         month_end = end_of_month(today)
 
         lines.append("")
         if salary_date is not None:
-            until_salary = await _pending_until(
-                session, user.telegram_id, today, salary_date
+            until_salary = await _projected_card(
+                session, user, today, salary_date, include_horizon=False
             )
-            lines.append(
-                f"*Свободно до ЗП:* "
-                f"{format_amount(free_money - until_salary)}"
-            )
-        until_month_end = await _pending_until(
-            session, user.telegram_id, today, month_end
+            lines.append(f"*Свободно до ЗП:* {format_amount(until_salary)}")
+        until_month_end = await _projected_card(
+            session, user, today, month_end, include_horizon=True
         )
         lines.append(
-            f"*Свободно до конца месяца:* "
-            f"{format_amount(free_money - until_month_end)}"
+            f"*Свободно до конца месяца:* {format_amount(until_month_end)}"
         )
 
     savings_balance = await accounts_repo.get_balance(
@@ -501,9 +533,11 @@ async def _family_screen(
     members: list[FamilyMember] | None = None,
 ) -> StatsScreen:
     """Собирает «Общую» семейную сводку: счета обоих, свободно, цели, операции."""
-    today = today or datetime.now(UTC).date()
+    today = today or moscow_today()
     if members is None:
         members = await family_repo.get_family_members(session, family.id)
+    for member in members:
+        await debts_service.normalize_debts(session, member.telegram_id, today)
     member_ids = [member.telegram_id for member in members]
     names = {member.telegram_id: member_name(member) for member in members}
 
@@ -599,7 +633,8 @@ async def _member_screen(
     today: date | None = None,
 ) -> StatsScreen:
     """Собирает «Мою» сводку участника: только его счета, платежи, операции."""
-    today = today or datetime.now(UTC).date()
+    today = today or moscow_today()
+    await debts_service.normalize_debts(session, member_id, today)
     card = await accounts_repo.get_balance(session, member_id, "card")
     savings = await accounts_repo.get_balance(session, member_id, "savings")
 
@@ -689,7 +724,7 @@ async def build_view(
     today: date | None = None,
 ) -> tuple[str, InlineKeyboardMarkup | None] | None:
     """Пересобирает экран /stats в указанном виде (solo/fam/u<id>)."""
-    today = today or datetime.now(UTC).date()
+    today = today or moscow_today()
     if view == "solo":
         screen = await _solo_screen(session, actor, today)
         return screen.text, _compose_keyboard(screen, "solo", actor.telegram_id)
@@ -722,7 +757,7 @@ async def build_stats_screen(
     session: AsyncSession, user: User, today: date | None = None
 ) -> tuple[str, InlineKeyboardMarkup | None]:
     """Экран /stats по умолчанию: «Общая» с кнопками или соло без кнопок."""
-    today = today or datetime.now(UTC).date()
+    today = today or moscow_today()
     family = await family_repo.get_family(session, user.telegram_id)
     view = "fam" if family is not None else "solo"
     rendered = await build_view(session, user, view, today)

@@ -41,8 +41,8 @@ def test_verdict_cumulative_same_day() -> None:
     assert (second.free, second.shortfall) == (20000, 10000)
 
 
-def test_verdict_not_cumulative_between_days() -> None:
-    """Между днями остаток сбрасывается."""
+def test_verdict_cumulative_between_days() -> None:
+    """Баланс ведётся сквозным: остаток переносится на следующий день."""
     payments = [
         (DAY, 40000, "Кредит", 1, "Ильгам"),
         (NEXT_DAY, 40000, "Ипотека", 1, "Ильгам"),
@@ -51,8 +51,57 @@ def test_verdict_not_cumulative_between_days() -> None:
     assert len(groups) == 2
     assert groups[0][0].free == 50000
     assert groups[0][0].shortfall == 0
-    assert groups[1][0].free == 50000
-    assert groups[1][0].shortfall == 0
+    assert groups[1][0].free == 10000
+    assert groups[1][0].shortfall == 30000
+
+
+def test_verdict_income_before_payment_covers() -> None:
+    """Доход до даты платежа делает вердикт «хватает»."""
+    incomes = {1: [(date(2026, 9, 20), 50000)]}
+    groups = build_payment_verdicts(
+        [(DAY, 46000, "Кредит", 1, "Ильгам")], {1: 12000}, incomes
+    )
+    verdict = groups[0][0]
+    assert verdict.free == 62000
+    assert verdict.shortfall == 0
+    assert verdict.income == 50000
+    assert verdict.income_events == ((date(2026, 9, 20), 50000),)
+
+
+def test_verdict_income_after_payment_ignored() -> None:
+    """Доход после даты платежа не учитывается."""
+    incomes = {1: [(date(2026, 9, 30), 50000)]}
+    groups = build_payment_verdicts(
+        [(DAY, 46000, "Кредит", 1, "Ильгам")], {1: 12000}, incomes
+    )
+    verdict = groups[0][0]
+    assert verdict.free == 12000
+    assert verdict.shortfall == 34000
+    assert verdict.income == 0
+
+
+def test_verdict_income_same_day_before_payment() -> None:
+    """Доход в день платежа приходит раньше платежа."""
+    incomes = {1: [(DAY, 50000)]}
+    groups = build_payment_verdicts(
+        [(DAY, 46000, "Кредит", 1, "Ильгам")], {1: 12000}, incomes
+    )
+    verdict = groups[0][0]
+    assert verdict.free == 62000
+    assert verdict.shortfall == 0
+
+
+def test_verdict_income_owner_scoped() -> None:
+    """Доход одного владельца не помогает другому."""
+    payments = [
+        (DAY, 40000, "Кредит", 1, "Ильгам"),
+        (DAY, 40000, "Ипотека", 2, "Жена"),
+    ]
+    incomes = {1: [(DAY, 50000)]}
+    groups = build_payment_verdicts(payments, {1: 0, 2: 30000}, incomes)
+    first, second = groups[0]
+    assert (first.free, first.shortfall) == (50000, 0)
+    assert (second.free, second.shortfall) == (30000, 10000)
 
 
 def test_verdict_negative_balance() -> None:

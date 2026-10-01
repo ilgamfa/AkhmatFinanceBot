@@ -6,10 +6,31 @@ import calendar
 import json
 import math
 from collections.abc import Iterable
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from utils.money import format_amount
+
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+# Верхняя граница числа генерируемых поступлений (страховка от дальних дат).
+MAX_INCOME_OCCURRENCES = 120
+
+
+def moscow_today(now: datetime | None = None) -> date:
+    """Сегодняшняя дата по Europe/Moscow."""
+    moment = now or datetime.now(MOSCOW_TZ)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=MOSCOW_TZ)
+    return moment.astimezone(MOSCOW_TZ).date()
+
+
+def day_bounds_utc(day: date) -> tuple[str, str]:
+    """Границы суток ``day`` по MSK, выраженные в UTC (ISO)."""
+    start = datetime(day.year, day.month, day.day, tzinfo=MOSCOW_TZ)
+    end = start + timedelta(days=1)
+    return start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
 
 
 def parse_income_dates(raw: str | None) -> list[tuple[int, int]]:
@@ -73,6 +94,32 @@ def end_of_month(today: date) -> date:
     """Последний день текущего календарного месяца."""
     last_day = calendar.monthrange(today.year, today.month)[1]
     return date(today.year, today.month, last_day)
+
+
+def income_occurrences(
+    entries: Iterable[tuple[int, int]],
+    today: date,
+    until: date,
+) -> list[tuple[date, int]]:
+    """Будущие поступления ``(дата, сумма)`` в окне ``today..until`` (вкл.).
+
+    Для каждой пары ``(день месяца, сумма)`` берётся ближайшее вхождение
+    этого числа, не раньше ``today``. Нерегулярный доход сюда не попадает —
+    вызывающий сам решает, задавать ли даты.
+    """
+    events: list[tuple[date, int]] = []
+    for day, amount in entries:
+        for offset in range(MAX_INCOME_OCCURRENCES + 1):
+            month_index = today.month - 1 + offset
+            year = today.year + month_index // 12
+            month = month_index % 12 + 1
+            candidate = _clamp_day(year, month, day)
+            if candidate > until:
+                break
+            if candidate >= today:
+                events.append((candidate, amount))
+    events.sort()
+    return events
 
 
 # --- Цели (Фаза 4) -----------------------------------------------------------

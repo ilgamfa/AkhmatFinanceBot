@@ -14,7 +14,9 @@ from services import (
     transactions_repo,
     users_repo,
 )
+from services.calculations import dump_income_dates
 from services.reminder_service import MOSCOW_TZ
+from services.stats_service import PaymentVerdict
 
 Send = Callable[..., Awaitable[list[str]]]
 Press = Callable[..., Awaitable[list[str]]]
@@ -127,7 +129,15 @@ async def test_compose_payment_text_verdict(session: object) -> None:
     payment = await debts_repo.add_payment(  # type: ignore[arg-type]
         session, debt.id, 46000, today + timedelta(days=1)
     )
-    text = reminder_service.compose_payment_text(1, 50000, [(payment, debt)])
+    verdict = PaymentVerdict(
+        payment_date=today + timedelta(days=1),
+        debt_name=debt.name,
+        amount=payment.amount,
+        owner_name="",
+        free=50000,
+        shortfall=0,
+    )
+    text = reminder_service.compose_payment_text(1, [verdict])
     assert "Завтра" in text
     assert "Кредит" in text
     assert "46 000 ₽" in text
@@ -154,15 +164,15 @@ async def test_evening_job_sends_once_per_day(database: object, bot: object) -> 
 async def test_evening_job_skips_when_transaction_exists(
     database: object, bot: object
 ) -> None:
+    now = reminder_service.now_moscow()
     async with database.session_factory() as setup:  # type: ignore[attr-defined]
         user = await users_repo.get_or_create(setup, 1)
         await users_repo.skip_onboarding(setup, user)
         await reminders_repo.update_reminder_settings(
-            setup, 1, reminder_evening_time="21:00"
+            setup, 1, reminder_evening_time=now.strftime("%H:%M")
         )
         await transactions_repo.add_transaction(setup, 1, "expense", 100)
 
-    now = datetime(2026, 9, 28, 21, 0, tzinfo=MOSCOW_TZ)
     await evening_job(database, bot, now)  # type: ignore[arg-type]
     assert bot.session.sent == []  # type: ignore[attr-defined]
 
@@ -183,6 +193,34 @@ async def test_payment_job_sends_verdict(database: object, bot: object) -> None:
     assert len(bot.session.sent) == 1  # type: ignore[attr-defined]
     text = bot.session.sent[0].text  # type: ignore[attr-defined]
     assert "Завтра" in text and "46 000 ₽" in text and "хватает ✅" in text
+
+
+async def test_payment_job_counts_income(database: object, bot: object) -> None:
+    """Платёжное напоминание считает вердикт с учётом зарплаты владельца."""
+    now = reminder_service.now_moscow()
+    due = now.date() + timedelta(days=1)
+    async with database.session_factory() as setup:  # type: ignore[attr-defined]
+        user = await users_repo.get_or_create(setup, 1)
+        await users_repo.save_onboarding_profile(
+            setup,
+            user,
+            income_type="fixed",
+            income_dates=dump_income_dates([(now.date().day, 50000)]),
+        )
+        await accounts_repo.create_accounts(setup, 1, card_balance=12000)
+        await reminders_repo.update_reminder_settings(
+            setup,
+            1,
+            reminder_payment_time=now.strftime("%H:%M"),
+            reminder_payment_days_before=1,
+        )
+        debt = await debts_repo.create_debt(setup, 1, "Кредит")
+        await debts_repo.add_payment(setup, debt.id, 46000, due)
+
+    await payment_job(database, bot, now)  # type: ignore[arg-type]
+    assert len(bot.session.sent) == 1  # type: ignore[attr-defined]
+    text = bot.session.sent[0].text  # type: ignore[attr-defined]
+    assert "62 000 ₽ — хватает ✅" in text
 
 
 # --- команда /reminders -------------------------------------------------------

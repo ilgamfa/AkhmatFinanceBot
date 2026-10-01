@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Debt, DebtPayment, Transaction, User
-from services import debts_repo, stats_service
+from services import debts_repo
+from services.calculations import day_bounds_utc
+from services.stats_service import PaymentVerdict
 from utils.money import format_amount
 
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -29,9 +31,7 @@ def moscow_today(now: datetime | None = None) -> date:
 
 def _day_bounds_utc(day: date) -> tuple[str, str]:
     """Границы суток MSK в UTC (``created_at`` хранится в UTC, ISO)."""
-    start = datetime(day.year, day.month, day.day, tzinfo=MOSCOW_TZ)
-    end = start + timedelta(days=1)
-    return start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()
+    return day_bounds_utc(day)
 
 
 async def has_transactions_today(
@@ -107,20 +107,14 @@ def _verdict_tail(free: int, shortfall: int) -> str:
 
 def compose_payment_text(
     days_before: int,
-    free: int,
-    pairs: list[tuple[DebtPayment, Debt]],
+    verdicts: list[PaymentVerdict],
 ) -> str:
     """Текст платёжного напоминания с вердиктом «хватает / не хватает».
 
-    Платежи в один день вычитаются последовательно (та же логика, что в
-    ``/stats``). Несколько платежей — нумерованным списком.
+    Вердикты приходят уже посчитанными со сквозным балансом и доходом
+    владельца (та же логика, что в ``/stats``). Несколько платежей в один
+    день — нумерованным списком.
     """
-    payments = [
-        (date.fromisoformat(payment.due_date), payment.amount, debt.name, 0, "")
-        for payment, debt in pairs
-    ]
-    groups = stats_service.build_payment_verdicts(payments, {0: free})
-    verdicts = groups[0] if groups else []
     word = day_word(days_before)
 
     if len(verdicts) == 1:
